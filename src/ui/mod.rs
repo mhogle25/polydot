@@ -8,6 +8,10 @@
 
 use std::fmt::Write;
 
+pub mod menu;
+
+pub use menu::{Menu, MenuOption};
+
 /// Right-pad `s` with spaces so it occupies at least `width` display columns.
 /// Treats every char as one column — fine for the ASCII labels we emit.
 pub fn pad_right(s: &str, width: usize) -> String {
