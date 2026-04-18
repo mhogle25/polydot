@@ -1,6 +1,3 @@
-// Allow until Phase 1 wires Error into config/paths.
-#![allow(dead_code)]
-
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -10,21 +7,12 @@ pub enum Error {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("git: {0}")]
-    Git(#[from] git2::Error),
-
     #[error("toml parse: {0}")]
     TomlDe(#[from] toml::de::Error),
-
-    #[error("toml serialize: {0}")]
-    TomlSer(#[from] toml::ser::Error),
 
     #[error("config: {0}")]
     Config(String),
 
     #[error("path expression: {0}")]
     Path(String),
-
-    #[error("link: {0}")]
-    Link(String),
 }

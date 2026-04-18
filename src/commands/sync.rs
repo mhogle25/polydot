@@ -1,6 +1,6 @@
-use std::path::Path;
+use crate::config::Config;
 
-pub fn run(_config: Option<&Path>) -> anyhow::Result<()> {
+pub fn run(_config: &Config) -> anyhow::Result<()> {
     eprintln!("polydot sync: not yet implemented");
     Ok(())
 }
