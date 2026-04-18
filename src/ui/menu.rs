@@ -27,6 +27,7 @@ pub struct MenuOption<T> {
     pub shortcut: char,
     pub label: String,
     pub value: T,
+    pub enabled: bool,
 }
 
 impl<T> MenuOption<T> {
@@ -35,7 +36,18 @@ impl<T> MenuOption<T> {
             shortcut,
             label: label.into(),
             value,
+            enabled: true,
         }
+    }
+
+    /// Mark this option as conditionally available. Disabled options are
+    /// dropped entirely from the menu — they don't render, can't be jumped
+    /// to via shortcut, and don't take up an index slot. Use this when an
+    /// action is structurally impossible in the current context (e.g.
+    /// "adopt into the repo" when the in-repo target already exists).
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled = on;
+        self
     }
 }
 
@@ -47,8 +59,14 @@ pub struct Menu<T> {
 }
 
 impl<T> Menu<T> {
+    /// Build a menu from `options`. Disabled options are filtered out up
+    /// front so all subsequent indexing is against the visible list.
     pub fn new(options: Vec<MenuOption<T>>) -> Self {
-        assert!(!options.is_empty(), "Menu requires at least one option");
+        let options: Vec<MenuOption<T>> = options.into_iter().filter(|o| o.enabled).collect();
+        assert!(
+            !options.is_empty(),
+            "Menu requires at least one enabled option"
+        );
         Self {
             options,
             default_index: 0,
@@ -57,17 +75,40 @@ impl<T> Menu<T> {
         }
     }
 
-    pub fn default_index(mut self, index: usize) -> Self {
-        assert!(index < self.options.len(), "default index out of range");
-        self.default_index = index;
+    /// Highlight the option with this shortcut by default. Panics if no
+    /// enabled option owns it — callers should pin defaults to options
+    /// that are always present (e.g. the universal "skip" or "quit").
+    pub fn default_shortcut(mut self, c: char) -> Self {
+        let index = self.resolve_shortcut(c);
+        assert!(
+            index.is_some(),
+            "default shortcut `{c}` not found in enabled options",
+        );
+        self.default_index = index.unwrap_or(0);
         self
     }
 
-    /// Index of the option Esc should select. If unset, Esc is a no-op.
-    pub fn cancel_index(mut self, index: usize) -> Self {
-        assert!(index < self.options.len(), "cancel index out of range");
-        self.cancel_index = Some(index);
+    /// Map Esc to the option with this shortcut. Panics if no enabled
+    /// option owns it.
+    pub fn cancel_shortcut(mut self, c: char) -> Self {
+        let index = self.resolve_shortcut(c);
+        assert!(
+            index.is_some(),
+            "cancel shortcut `{c}` not found in enabled options",
+        );
+        self.cancel_index = index;
         self
+    }
+
+    fn resolve_shortcut(&self, c: char) -> Option<usize> {
+        self.options.iter().position(|o| o.shortcut == c)
+    }
+
+    /// Visible options after filtering. Test-only seam so callers can
+    /// assert which options the menu actually exposes for a given context.
+    #[cfg(test)]
+    pub(crate) fn options(&self) -> &[MenuOption<T>] {
+        &self.options
     }
 
     /// Run the menu against the user's terminal. Requires an attended TTY.
@@ -368,5 +409,54 @@ mod tests {
             drive(0, None, vec![Key::Tab, Key::Char('x'), Key::Char('s')]),
             3
         );
+    }
+
+    #[test]
+    fn disabled_options_are_filtered_out() {
+        let opts = vec![
+            MenuOption::new('o', "[o]verwrite", "overwrite"),
+            MenuOption::new('a', "[a]dopt", "adopt").enabled(false),
+            MenuOption::new('s', "[s]kip", "skip"),
+        ];
+        let menu = Menu::new(opts);
+        let visible: Vec<char> = menu.options().iter().map(|o| o.shortcut).collect();
+        assert_eq!(visible, vec!['o', 's']);
+    }
+
+    #[test]
+    fn default_shortcut_resolves_post_filter() {
+        let opts = vec![
+            MenuOption::new('o', "[o]verwrite", "overwrite"),
+            MenuOption::new('a', "[a]dopt", "adopt").enabled(false),
+            MenuOption::new('s', "[s]kip", "skip"),
+        ];
+        let menu = Menu::new(opts).default_shortcut('s');
+        assert_eq!(menu.default_index, 1); // post-filter: [o, s] → s is index 1
+    }
+
+    #[test]
+    fn cancel_shortcut_resolves_post_filter() {
+        let opts = vec![
+            MenuOption::new('o', "[o]verwrite", "overwrite"),
+            MenuOption::new('d', "[d]iff", "diff").enabled(false),
+            MenuOption::new('q', "[q]uit", "quit"),
+        ];
+        let menu = Menu::new(opts).cancel_shortcut('q');
+        assert_eq!(menu.cancel_index, Some(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "default shortcut `x`")]
+    fn default_shortcut_panics_when_missing() {
+        let opts = vec![MenuOption::new('o', "[o]verwrite", "overwrite")];
+        Menu::new(opts).default_shortcut('x');
+    }
+
+    #[test]
+    #[should_panic(expected = "Menu requires at least one enabled option")]
+    fn all_disabled_panics() {
+        let opts: Vec<MenuOption<&str>> =
+            vec![MenuOption::new('o', "[o]verwrite", "overwrite").enabled(false)];
+        Menu::new(opts);
     }
 }

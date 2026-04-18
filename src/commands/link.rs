@@ -41,12 +41,23 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
     run_with(config, &mut prompt_via_menu)
 }
 
+/// Snapshot of everything the conflict-resolution prompter needs to make
+/// a decision: the classified state plus the paths involved. Lets the
+/// prompter (and the menu it builds) reason about which actions are
+/// structurally possible — e.g. Adopt requires the in-repo source to be
+/// absent, Diff requires the on-disk target to be a regular file.
+pub(crate) struct PromptCtx<'a> {
+    pub state: &'a LinkState,
+    pub expected_source: &'a Path,
+    pub to: &'a Path,
+}
+
 /// Test seam: same as [`run`] but with the conflict-resolution prompter
 /// injected. Production wires it to the interactive menu; tests pass a
 /// scripted closure so the prompt path is exercised without needing a TTY.
 pub(crate) fn run_with<F>(config: &Config, prompter: &mut F) -> anyhow::Result<()>
 where
-    F: FnMut(&LinkState) -> anyhow::Result<Choice>,
+    F: FnMut(&PromptCtx<'_>) -> anyhow::Result<Choice>,
 {
     if config.repos.is_empty() {
         println!("(no repos configured)");
@@ -78,8 +89,8 @@ where
     Ok(())
 }
 
-fn prompt_via_menu(state: &LinkState) -> anyhow::Result<Choice> {
-    Ok(build_menu(state).interact()?)
+fn prompt_via_menu(ctx: &PromptCtx<'_>) -> anyhow::Result<Choice> {
+    Ok(build_menu(ctx).interact()?)
 }
 
 #[derive(Debug)]
@@ -109,7 +120,7 @@ fn process_link<F>(
     prompter: &mut F,
 ) -> anyhow::Result<StepOutcome>
 where
-    F: FnMut(&LinkState) -> anyhow::Result<Choice>,
+    F: FnMut(&PromptCtx<'_>) -> anyhow::Result<Choice>,
 {
     let to = PathBuf::from(
         evaluate(&link_cfg.to, env)
@@ -136,11 +147,16 @@ fn prompt_and_resolve<F>(
     prompter: &mut F,
 ) -> anyhow::Result<StepOutcome>
 where
-    F: FnMut(&LinkState) -> anyhow::Result<Choice>,
+    F: FnMut(&PromptCtx<'_>) -> anyhow::Result<Choice>,
 {
     print_conflict_header(repo_name, expected_source, to, conflict);
+    let ctx = PromptCtx {
+        state: conflict,
+        expected_source,
+        to,
+    };
     loop {
-        let choice = prompter(conflict)?;
+        let choice = prompter(&ctx)?;
         match choice {
             Choice::Diff => {
                 print_diff_unavailable();
@@ -166,8 +182,17 @@ pub(crate) enum Choice {
     Quit,
 }
 
-fn build_menu(conflict: &LinkState) -> Menu<Choice> {
-    let mut options = vec![
+fn build_menu(ctx: &PromptCtx<'_>) -> Menu<Choice> {
+    // Adopt moves the existing target INTO the repo at `expected_source`.
+    // If something already lives there, the move would clobber it — so the
+    // option is structurally impossible and shouldn't be offered.
+    let adopt_possible = !ctx.expected_source.exists();
+    // Diff only makes sense when there's something to compare against the
+    // repo's version. Symlinks (WrongTarget) and directories don't qualify.
+    let diff_available =
+        matches!(ctx.state, LinkState::UnmanagedConflict) && is_regular_file(ctx.to);
+
+    let options = vec![
         MenuOption::new(
             'o',
             "[o]verwrite — remove existing, create symlink",
@@ -182,35 +207,32 @@ fn build_menu(conflict: &LinkState) -> Menu<Choice> {
             'a',
             "[a]dopt     — move existing INTO the repo, then symlink",
             Choice::Action(Action::Adopt),
-        ),
+        )
+        .enabled(adopt_possible),
         MenuOption::new(
             's',
             "[s]kip      — leave this one alone for now",
             Choice::Action(Action::Skip),
         ),
-    ];
-    // Diff only makes sense for regular files. For directories or wrong
-    // symlinks, omit the option entirely rather than showing a dead key.
-    if matches!(conflict, LinkState::UnmanagedConflict) {
-        options.push(MenuOption::new(
+        MenuOption::new(
             'd',
             "[d]iff      — show difference between existing and repo content",
             Choice::Diff,
-        ));
-    }
-    options.push(MenuOption::new(
-        'q',
-        "[q]uit      — stop processing remaining links",
-        Choice::Quit,
-    ));
-    let cancel_index = options.len() - 1; // Quit is always last.
-    let skip_index = options
-        .iter()
-        .position(|o| matches!(o.value, Choice::Action(Action::Skip)))
-        .unwrap_or(0);
+        )
+        .enabled(diff_available),
+        MenuOption::new(
+            'q',
+            "[q]uit      — stop processing remaining links",
+            Choice::Quit,
+        ),
+    ];
     Menu::new(options)
-        .default_index(skip_index)
-        .cancel_index(cancel_index)
+        .default_shortcut('s')
+        .cancel_shortcut('q')
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    matches!(std::fs::symlink_metadata(path), Ok(m) if m.is_file())
 }
 
 fn print_conflict_header(repo_name: &str, expected_source: &Path, to: &Path, state: &LinkState) {
@@ -285,9 +307,9 @@ mod tests {
     }
 
     /// Scripted prompter: pops choices in order, errors if exhausted.
-    fn scripted(choices: Vec<Choice>) -> impl FnMut(&LinkState) -> anyhow::Result<Choice> {
+    fn scripted(choices: Vec<Choice>) -> impl FnMut(&PromptCtx<'_>) -> anyhow::Result<Choice> {
         let mut queue: VecDeque<Choice> = choices.into();
-        move |_state| {
+        move |_ctx| {
             queue
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("scripted prompter exhausted"))
@@ -473,6 +495,79 @@ mod tests {
         run_with(&config, &mut prompter).unwrap();
 
         assert_eq!(fs::read_to_string(&conflict_to).unwrap(), "user");
+    }
+
+    fn shortcuts(menu: &Menu<Choice>) -> Vec<char> {
+        menu.options().iter().map(|o| o.shortcut).collect()
+    }
+
+    #[test]
+    fn build_menu_hides_adopt_when_source_already_exists() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("repo/already-here");
+        write_file(&source, ""); // source EXISTS — Adopt would clobber
+        let to = tmp.path().join("home/file");
+        write_file(&to, "user");
+        let ctx = PromptCtx {
+            state: &LinkState::UnmanagedConflict,
+            expected_source: &source,
+            to: &to,
+        };
+        let menu = build_menu(&ctx);
+        assert!(!shortcuts(&menu).contains(&'a'));
+        // Diff is offered for regular files.
+        assert!(shortcuts(&menu).contains(&'d'));
+    }
+
+    #[test]
+    fn build_menu_offers_adopt_when_source_missing() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("repo/not-yet-there");
+        // Source does NOT exist.
+        let to = tmp.path().join("home/file");
+        write_file(&to, "user");
+        let ctx = PromptCtx {
+            state: &LinkState::UnmanagedConflict,
+            expected_source: &source,
+            to: &to,
+        };
+        let menu = build_menu(&ctx);
+        assert!(shortcuts(&menu).contains(&'a'));
+    }
+
+    #[test]
+    fn build_menu_hides_diff_for_directory_conflicts() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("repo/x");
+        let to = tmp.path().join("home/x");
+        fs::create_dir_all(&to).unwrap(); // directory, not file
+        let ctx = PromptCtx {
+            state: &LinkState::UnmanagedConflict,
+            expected_source: &source,
+            to: &to,
+        };
+        let menu = build_menu(&ctx);
+        assert!(!shortcuts(&menu).contains(&'d'));
+    }
+
+    #[test]
+    fn build_menu_hides_diff_for_wrong_target_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("repo/x");
+        let elsewhere = tmp.path().join("elsewhere");
+        write_file(&elsewhere, "");
+        let to = tmp.path().join("home/x");
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        unix_fs::symlink(&elsewhere, &to).unwrap();
+        let ctx = PromptCtx {
+            state: &LinkState::WrongTarget {
+                actual: elsewhere.clone(),
+            },
+            expected_source: &source,
+            to: &to,
+        };
+        let menu = build_menu(&ctx);
+        assert!(!shortcuts(&menu).contains(&'d'));
     }
 
     #[test]
