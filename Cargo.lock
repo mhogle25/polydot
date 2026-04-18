@@ -584,6 +584,7 @@ dependencies = [
  "dirs",
  "git2",
  "serde",
+ "tempfile",
  "thiserror",
  "toml",
  "tracing",

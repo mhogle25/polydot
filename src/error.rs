@@ -15,4 +15,7 @@ pub enum Error {
 
     #[error("path expression: {0}")]
     Path(String),
+
+    #[error("git: {0}")]
+    Git(#[from] git2::Error),
 }
