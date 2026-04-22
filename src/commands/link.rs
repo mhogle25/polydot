@@ -321,7 +321,7 @@ mod tests {
     /// so no env substitution is required at test time.
     fn config_for(clone_path: &Path, links: &[(&str, &Path)]) -> Config {
         let mut toml = format!(
-            "[r]\nrepo = \"unused\"\nclone = \"{}\"\n",
+            "[r]\nrepo = \"https://example.com/r.git\"\nclone = \"{}\"\n",
             clone_path.display()
         );
         for (from, to) in links {

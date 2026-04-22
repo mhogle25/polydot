@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 
 pub mod commands;
 pub mod config;
+pub mod credentials;
 pub mod error;
 pub mod git;
 pub mod link;
@@ -42,7 +43,7 @@ struct Cli {
 enum Command {
     /// Clone the config repo, symlink config.toml into place, then sync + link everything else
     Bootstrap {
-        /// SSH or HTTPS URL of the polydot-config repo
+        /// HTTPS URL of the config repo
         url: String,
     },
     /// Clone missing repos. Pull existing repos.
@@ -52,13 +53,13 @@ enum Command {
     /// Per-repo summary: clean/dirty, ahead/behind origin, link state.
     Status,
     /// Commit dirty changes + push, across all managed repos.
+    ///
+    /// Pass 1: shared commit message only — pass `-m "<msg>"`. Per-repo
+    /// interactive mode lands in a future phase.
     Save {
-        /// Force shared commit message regardless of default mode
+        /// Shared commit message used for every repo with dirty changes
         #[arg(long, short)]
-        message: Option<String>,
-        /// Force interactive (per-repo prompts) regardless of default mode
-        #[arg(long, short)]
-        interactive: bool,
+        message: String,
     },
     /// Push already-committed work across all repos. No new commits.
     Push,
@@ -98,12 +99,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Sync => with_config(config_path, commands::sync::run),
         Command::Link => with_config(config_path, commands::link::run),
         Command::Status => with_config(config_path, commands::status::run),
-        Command::Save {
-            message,
-            interactive,
-        } => with_config(config_path, |c| {
-            commands::save::run(c, message.as_deref(), interactive)
-        }),
+        Command::Save { message } => {
+            with_config(config_path, |c| commands::save::run(c, &message))
+        }
         Command::Push => with_config(config_path, commands::push::run),
     }
 }

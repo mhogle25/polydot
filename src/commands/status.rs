@@ -223,7 +223,6 @@ mod tests {
     fn report_for_unconfigured_repos_shows_marker() {
         let config = Config {
             path: None,
-            save: Default::default(),
             repos: BTreeMap::new(),
         };
         // run() prints — we can't easily capture stdout here without extra
@@ -330,14 +329,13 @@ mod tests {
         repos.insert(
             "demo".to_string(),
             RepoConfig {
-                repo: "git@example.com:demo.git".to_string(),
+                repo: "https://example.com/demo.git".to_string(),
                 clone: parse(clone_path.to_str().unwrap()).unwrap(),
                 links: vec![link_at("file", to.to_str().unwrap())],
             },
         );
         let config = Config {
             path: None,
-            save: Default::default(),
             repos,
         };
 

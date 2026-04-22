@@ -415,15 +415,13 @@ mod tests {
     }
 
     #[test]
-    fn realistic_dogfood_expression() {
-        let expr = must_parse("~/.claude/projects/${~/dev/projects/lish-zig | slug}/memory");
+    fn realistic_compound_expression() {
+        let expr = must_parse("~/.notes/${~/dev/projects/example-app | slug}/index");
         assert_eq!(expr.nodes.len(), 4);
         assert!(matches!(expr.nodes[0], Node::Home { .. }));
-        assert!(
-            matches!(&expr.nodes[1], Node::Literal { text, .. } if text == "/.claude/projects/")
-        );
+        assert!(matches!(&expr.nodes[1], Node::Literal { text, .. } if text == "/.notes/"));
         assert!(matches!(expr.nodes[2], Node::Substitution { .. }));
-        assert!(matches!(&expr.nodes[3], Node::Literal { text, .. } if text == "/memory"));
+        assert!(matches!(&expr.nodes[3], Node::Literal { text, .. } if text == "/index"));
     }
 
     #[test]
@@ -436,7 +434,7 @@ mod tests {
     #[test]
     fn display_round_trips_canonical_form() {
         // Canonical surface form (single space around `|`, no padding inside `${}`).
-        let canonical = "~/.claude/projects/${~/dev/projects/lish-zig | slug}/memory";
+        let canonical = "~/.notes/${~/dev/projects/example-app | slug}/index";
         let expr = must_parse(canonical);
         assert_eq!(expr.to_string(), canonical);
     }

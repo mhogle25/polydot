@@ -77,9 +77,6 @@ fn status_against_two_repos_clean_and_dirty() {
     let config_path = scratch.path().join("config.toml");
     let config = format!(
         r#"
-[save]
-default_mode = "per-repo"
-
 [alpha]
 repo  = "file://{bare_alpha}"
 clone = "{clone_alpha}"

@@ -179,10 +179,10 @@ mod tests {
     }
 
     #[test]
-    fn realistic_dogfood_evaluation() {
+    fn realistic_compound_evaluation() {
         assert_eq!(
-            eval("~/.claude/projects/${~/dev/projects/lish-zig | slug}/memory"),
-            "/home/test/.claude/projects/-home-test-dev-projects-lish-zig/memory",
+            eval("~/.notes/${~/dev/projects/example-app | slug}/index"),
+            "/home/test/.notes/-home-test-dev-projects-example-app/index",
         );
     }
 }
