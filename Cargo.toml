@@ -1,6 +1,6 @@
 [package]
 name = "polydot"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 authors = ["Mitchell Hogle <mitchellhogle@gmail.com>"]
 description = "Git orchestrator for managing N dotfile repos with one command each"
@@ -14,7 +14,6 @@ categories = ["command-line-utilities"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 console = "0.15"
-dialoguer = "0.11"
 dirs = "5"
 git2 = "0.19"
 libc = "0.2"

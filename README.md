@@ -4,10 +4,6 @@ Git orchestrator for managing N dotfile repos with one command each.
 
 `polydot` is built for the per-feature-repo dotfile pattern: one git repo per concern (editor config, shell config, claude memory, etc.). Instead of running `git pull`, `git push`, and `ln -sfn` loops by hand across all of them, polydot does each operation against every managed repo in one command.
 
-## Status
-
-In active development. See [`ROADMAP.md`](ROADMAP.md) for phase plan.
-
 ## Install
 
 ```sh
@@ -30,6 +26,8 @@ Day-to-day:
 polydot status     # what's clean / dirty / behind / unlinked across all repos
 polydot sync       # pull all
 polydot save       # commit + push all dirty
+polydot commit     # commit all dirty, don't push (offline / review-before-push)
+polydot push       # distribute already-committed work across all repos
 polydot link       # repair any missing/wrong symlinks
 ```
 
