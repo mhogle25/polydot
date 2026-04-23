@@ -538,6 +538,27 @@ fn head_tracking(
     Ok((Some(branch_name), Some(upstream_name), Some(ahead_behind)))
 }
 
+// Cross-module test helpers. Exposed so the command-module test suites can
+// initialize git repos with a predictable default branch — CI runners set
+// `init.defaultBranch = master`, which breaks tests that assume `main`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use git2::{Repository, RepositoryInitOptions};
+    use std::path::Path;
+
+    pub fn init(path: &Path) -> Repository {
+        let mut opts = RepositoryInitOptions::new();
+        opts.initial_head("main");
+        Repository::init_opts(path, &opts).unwrap()
+    }
+
+    pub fn init_bare(path: &Path) -> Repository {
+        let mut opts = RepositoryInitOptions::new();
+        opts.bare(true).initial_head("main");
+        Repository::init_opts(path, &opts).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,9 +573,9 @@ mod tests {
         let work_dir = TempDir::new().unwrap();
 
         // Init bare remote.
-        let remote = Repository::init_bare(remote_dir.path()).unwrap();
+        let remote = super::test_support::init_bare(remote_dir.path());
         // Create local with an initial commit, then push to the bare remote.
-        let local = Repository::init(work_dir.path()).unwrap();
+        let local = super::test_support::init(work_dir.path());
         // Configure identity locally so commits don't depend on global config.
         let mut cfg = local.config().unwrap();
         cfg.set_str("user.name", "Test").unwrap();
@@ -1143,7 +1164,7 @@ mod tests {
     fn no_upstream_yields_none_ahead_behind() {
         // Build a local-only repo with no remote.
         let work = TempDir::new().unwrap();
-        let repo = Repository::init(work.path()).unwrap();
+        let repo = super::test_support::init(work.path());
         let mut cfg = repo.config().unwrap();
         cfg.set_str("user.name", "Test").unwrap();
         cfg.set_str("user.email", "test@example.com").unwrap();

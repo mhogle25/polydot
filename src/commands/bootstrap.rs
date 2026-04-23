@@ -164,7 +164,7 @@ mod tests {
     /// zero managed repos. Returns `(tempdir-handle, file:// URL)`.
     fn bare_remote_with_config(config_contents: &str) -> (TempDir, String) {
         let remote_dir = TempDir::new().unwrap();
-        Repository::init_bare(remote_dir.path()).unwrap();
+        crate::git::test_support::init_bare(remote_dir.path());
         let url = format!("file://{}", remote_dir.path().display());
 
         // Seed the remote by cloning into a tempdir, committing, pushing.

@@ -136,7 +136,7 @@ mod tests {
 
     fn bare_remote() -> (TempDir, String) {
         let dir = TempDir::new().unwrap();
-        Repository::init_bare(dir.path()).unwrap();
+        crate::git::test_support::init_bare(dir.path());
         let url = format!("file://{}", dir.path().display());
         (dir, url)
     }
@@ -187,7 +187,7 @@ mod tests {
     fn fixture_remote_and_clone() -> (TempDir, String, TempDir, PathBuf, Repository) {
         let (remote_dir, url) = bare_remote();
         let seed_dir = TempDir::new().unwrap();
-        let seed = Repository::init(seed_dir.path()).unwrap();
+        let seed = crate::git::test_support::init(seed_dir.path());
         let mut cfg = seed.config().unwrap();
         cfg.set_str("user.name", "Test").unwrap();
         cfg.set_str("user.email", "test@example.com").unwrap();
@@ -268,9 +268,7 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &mut scripted_commit_prompter(vec![CommitChoice::Message(
-                "interactive".to_string(),
-            )]),
+            &mut scripted_commit_prompter(vec![CommitChoice::Message("interactive".to_string())]),
         )
         .unwrap();
 
@@ -408,12 +406,7 @@ mod tests {
     #[test]
     fn empty_config_is_a_no_op() {
         let config = config_with(vec![]);
-        run_with(
-            &config,
-            &shared("msg"),
-            &mut never_called_commit_prompter(),
-        )
-        .unwrap();
+        run_with(&config, &shared("msg"), &mut never_called_commit_prompter()).unwrap();
     }
 
     #[test]

@@ -274,7 +274,10 @@ fn print_conflict_header(repo_name: &str, expected_source: &Path, to: &Path, sta
             format!("is a symlink → {}", actual.display())
         }
         LinkState::BrokenSource { source } => {
-            format!("is a dangling symlink — source missing: {}", source.display())
+            format!(
+                "is a dangling symlink — source missing: {}",
+                source.display()
+            )
         }
         LinkState::UnmanagedConflict => match std::fs::symlink_metadata(to) {
             Ok(m) if m.is_dir() => "exists as a directory".to_string(),

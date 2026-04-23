@@ -458,7 +458,7 @@ mod tests {
 
     fn bare_remote() -> (TempDir, String) {
         let dir = TempDir::new().unwrap();
-        Repository::init_bare(dir.path()).unwrap();
+        crate::git::test_support::init_bare(dir.path());
         let url = format!("file://{}", dir.path().display());
         (dir, url)
     }
@@ -518,7 +518,7 @@ mod tests {
     fn fixture_remote_and_clone() -> (TempDir, String, TempDir, PathBuf, Repository) {
         let (remote_dir, url) = bare_remote();
         let seed_dir = TempDir::new().unwrap();
-        let seed = Repository::init(seed_dir.path()).unwrap();
+        let seed = crate::git::test_support::init(seed_dir.path());
         let mut cfg = seed.config().unwrap();
         cfg.set_str("user.name", "Test").unwrap();
         cfg.set_str("user.email", "test@example.com").unwrap();

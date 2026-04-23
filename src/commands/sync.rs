@@ -344,7 +344,7 @@ mod tests {
     /// Bare-remote tempdir; returns the dir handle and a `file://` URL.
     fn bare_remote() -> (TempDir, String) {
         let dir = TempDir::new().unwrap();
-        Repository::init_bare(dir.path()).unwrap();
+        crate::git::test_support::init_bare(dir.path());
         let url = format!("file://{}", dir.path().display());
         (dir, url)
     }
@@ -407,7 +407,7 @@ mod tests {
 
         // Seed the remote: clone, commit, push.
         let seed_dir = TempDir::new().unwrap();
-        let seed = Repository::init(seed_dir.path()).unwrap();
+        let seed = crate::git::test_support::init(seed_dir.path());
         let mut cfg = seed.config().unwrap();
         cfg.set_str("user.name", "Test").unwrap();
         cfg.set_str("user.email", "test@example.com").unwrap();

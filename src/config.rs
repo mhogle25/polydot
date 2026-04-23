@@ -137,9 +137,8 @@ impl Config {
         let mut links: Vec<(String, String, PathBuf)> = Vec::new();
         for (name, repo) in &self.repos {
             for link in &repo.links {
-                let s = evaluate(&link.to, env).map_err(|e| {
-                    Error::Config(format!("[{name}] link `{}` to: {e}", link.from))
-                })?;
+                let s = evaluate(&link.to, env)
+                    .map_err(|e| Error::Config(format!("[{name}] link `{}` to: {e}", link.from)))?;
                 links.push((name.clone(), link.from.clone(), PathBuf::from(s)));
             }
         }
