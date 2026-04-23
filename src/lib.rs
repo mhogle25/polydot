@@ -43,8 +43,12 @@ struct Cli {
 enum Command {
     /// Clone the config repo, symlink config.toml into place, then sync + link everything else
     Bootstrap {
-        /// HTTPS URL of the config repo
+        /// HTTPS or file:// URL of the config repo
         url: String,
+        /// Directory to clone the config repo into
+        /// (default: $XDG_DATA_HOME/polydot/config — typically ~/.local/share/polydot/config)
+        #[arg(long)]
+        to: Option<PathBuf>,
     },
     /// Clone missing repos. Pull existing repos.
     Sync,
@@ -60,6 +64,16 @@ enum Command {
     ///   neither            → fall back to `[save] default-mode` in config;
     ///                        error if absent.
     Save {
+        /// Shared commit message used for every repo with dirty changes
+        #[arg(long, short, conflicts_with = "interactive")]
+        message: Option<String>,
+        /// Prompt per dirty repo for a commit message
+        #[arg(long, short, conflicts_with = "message")]
+        interactive: bool,
+    },
+    /// Commit dirty changes across all repos, without pushing. Mode
+    /// selection matches `save`.
+    Commit {
         /// Shared commit message used for every repo with dirty changes
         #[arg(long, short, conflicts_with = "interactive")]
         message: Option<String>,
@@ -101,7 +115,17 @@ fn init_tracing(verbose: bool) {
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let config_path = cli.config;
     match cli.command {
-        Command::Bootstrap { url } => commands::bootstrap::run(&url),
+        Command::Bootstrap { url, to } => {
+            let clone_dest = match to {
+                Some(p) => p,
+                None => default_bootstrap_dest()?,
+            };
+            let config_symlink = match config_path {
+                Some(p) => p,
+                None => default_config_path()?,
+            };
+            commands::bootstrap::run(&url, &clone_dest, &config_symlink)
+        }
         Command::Sync => with_config(config_path, commands::sync::run),
         Command::Link => with_config(config_path, commands::link::run),
         Command::Status => with_config(config_path, commands::status::run),
@@ -110,6 +134,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             interactive,
         } => with_config(config_path, |c| {
             commands::save::run(c, message.as_deref(), interactive)
+        }),
+        Command::Commit {
+            message,
+            interactive,
+        } => with_config(config_path, |c| {
+            commands::commit::run(c, message.as_deref(), interactive)
         }),
         Command::Push => with_config(config_path, commands::push::run),
     }
@@ -131,4 +161,9 @@ where
 fn default_config_path() -> anyhow::Result<PathBuf> {
     let dir = dirs::config_dir().context("could not determine user config dir")?;
     Ok(dir.join("polydot/config.toml"))
+}
+
+fn default_bootstrap_dest() -> anyhow::Result<PathBuf> {
+    let dir = dirs::data_dir().context("could not determine user data dir")?;
+    Ok(dir.join("polydot/config"))
 }

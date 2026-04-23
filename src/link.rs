@@ -20,10 +20,16 @@ const BACKUP_MAX_TRIES: usize = 1024;
 /// to the expected source path inside the managed repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkState {
-    /// Symlink exists and resolves to the expected source.
+    /// Symlink exists and resolves to the expected source, and that source
+    /// exists on disk.
     Correct,
     /// Symlink exists but points elsewhere. Carries the actual target.
     WrongTarget { actual: PathBuf },
+    /// Symlink points at the expected source path, but that source does not
+    /// exist — the file was deleted or renamed inside the managed repo and
+    /// config wasn't updated. Dangling in the POSIX sense. Carries the
+    /// (non-existent) expected source path so callers can render it.
+    BrokenSource { source: PathBuf },
     /// Nothing exists at `to`.
     Missing,
     /// `to` exists as a regular file or directory — not a symlink at all.
@@ -46,10 +52,17 @@ pub fn link_state(expected_source: &Path, to: &Path) -> Result<LinkState> {
 
     let raw_target = fs::read_link(to)?;
     let actual_abs = absolutize_symlink_target(&raw_target, to);
-    if same_path(&actual_abs, expected_source) {
+    if !same_path(&actual_abs, expected_source) {
+        return Ok(LinkState::WrongTarget { actual: actual_abs });
+    }
+    // Symlink points where we expect. Distinguish a live link (target exists)
+    // from a dangling one (source was deleted/renamed upstream).
+    if expected_source.exists() {
         Ok(LinkState::Correct)
     } else {
-        Ok(LinkState::WrongTarget { actual: actual_abs })
+        Ok(LinkState::BrokenSource {
+            source: expected_source.to_path_buf(),
+        })
     }
 }
 
@@ -77,16 +90,19 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// One of the four file-mutating responses a user can pick at a conflict
+/// One of the file-mutating responses a user can pick at a conflict
 /// prompt. `Skip` is a no-op kept here so callers can treat resolutions
-/// uniformly. `Quit` is intentionally absent — that's the driver's
-/// concern, not the filesystem layer's.
+/// uniformly. `Remove` deletes the on-disk entry at `to` outright — only
+/// valid from the broken-source prompt, where rebuilding the symlink would
+/// just recreate the dangling state. `Quit` is intentionally absent — that's
+/// the driver's concern, not the filesystem layer's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Overwrite,
     Backup,
     Adopt,
     Skip,
+    Remove,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +111,7 @@ pub enum ApplyOutcome {
     BackedUp { backup_path: PathBuf },
     Adopted,
     Skipped,
+    Removed,
 }
 
 /// Create the symlink `to → expected_source`, mkdir-p'ing the parent of
@@ -125,6 +142,10 @@ pub fn apply(expected_source: &Path, to: &Path, action: Action) -> Result<ApplyO
             Ok(ApplyOutcome::BackedUp { backup_path })
         }
         Action::Adopt => adopt(expected_source, to),
+        Action::Remove => {
+            remove_target(to)?;
+            Ok(ApplyOutcome::Removed)
+        }
     }
 }
 
@@ -375,6 +396,65 @@ mod tests {
         );
         // `to` is now a symlink pointing back to the adopted source.
         assert_eq!(link_state(&source, &to).unwrap(), LinkState::Correct);
+    }
+
+    #[test]
+    fn broken_source_reports_broken_source() {
+        let dir = TempDir::new().unwrap();
+        // Source never created — symlink points where we expect, but the
+        // expected file doesn't exist.
+        let source = dir.path().join("src");
+        let to = dir.path().join("link");
+        unix_fs::symlink(&source, &to).unwrap();
+        let state = link_state(&source, &to).unwrap();
+        match state {
+            LinkState::BrokenSource { source: reported } => {
+                assert_eq!(reported, source);
+            }
+            other => panic!("expected BrokenSource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relative_broken_symlink_still_classified_as_broken_source() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("src");
+        let to = dir.path().join("link");
+        // Relative target, interpreted from `to`'s parent — resolves to the
+        // same non-existent `src` path.
+        unix_fs::symlink("src", &to).unwrap();
+        assert!(matches!(
+            link_state(&source, &to).unwrap(),
+            LinkState::BrokenSource { .. }
+        ));
+    }
+
+    #[test]
+    fn broken_source_becomes_correct_once_source_is_created() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("src");
+        let to = dir.path().join("link");
+        unix_fs::symlink(&source, &to).unwrap();
+        assert!(matches!(
+            link_state(&source, &to).unwrap(),
+            LinkState::BrokenSource { .. }
+        ));
+        touch(&source);
+        assert_eq!(link_state(&source, &to).unwrap(), LinkState::Correct);
+    }
+
+    #[test]
+    fn apply_remove_deletes_symlink_without_restoring() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("src"); // never created
+        let to = dir.path().join("link");
+        unix_fs::symlink(&source, &to).unwrap();
+
+        let out = apply(&source, &to, Action::Remove).unwrap();
+        assert_eq!(out, ApplyOutcome::Removed);
+        assert!(fs::symlink_metadata(&to).is_err(), "symlink should be gone");
+        // We did NOT create `source` as a side effect.
+        assert!(!source.exists());
     }
 
     #[test]

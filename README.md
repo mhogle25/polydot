@@ -19,8 +19,10 @@ cargo install --git https://github.com/mhogle25/polydot
 New machine:
 
 ```sh
-polydot bootstrap git@github.com:<you>/<your-polydot-config>.git
+polydot bootstrap https://github.com/<you>/<your-polydot-config>.git
 ```
+
+Authentication is HTTPS + PAT (set `GITHUB_TOKEN` in the environment, or add the token to `~/.config/polydot/credentials.toml`). SSH URLs are not supported.
 
 Day-to-day:
 

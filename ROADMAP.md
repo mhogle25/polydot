@@ -196,10 +196,37 @@ Companion to [`docs/design.md`](docs/design.md). The design doc is *what* the to
 **Module dependencies:** all prior commands.
 
 **Acceptance:**
-- End-to-end test in a fresh container or VM: install `cargo install --git ...`, run `polydot bootstrap git@github.com:mhogle25/polydot-config.git`, verify all four claude-memory symlinks land correctly and all configured repos are cloned.
+- End-to-end test in a fresh container or VM: install `cargo install --git ...`, run `polydot bootstrap https://github.com/mhogle25/polydot-config.git`, verify all four claude-memory symlinks land correctly and all configured repos are cloned.
 - Re-running `bootstrap` on an already-bootstrapped machine should be safely idempotent (no-op or "already configured").
 
 **Estimated effort:** 1-2 sessions.
+
+---
+
+## Phase 7 — `commit` (save decomposition) ✅ shipped
+
+**Goal:** A dedicated `commit` command that stages and commits dirty repos without pushing. `save` becomes `commit` + `push`.
+
+**Why:** Symmetry with `push` (the other half of save). Enables offline workflows (batch-commit now, push later) and review-before-push patterns. The save interactive flow is already most of the implementation — this is extraction, not new logic.
+
+**Scope:**
+- Extract save's per-repo commit path (diff preview, message prompt, mode dispatch) into a shared function.
+- `commands/commit.rs`: iterate dirty repos → commit via shared function → summarize (`N committed, M skipped`). No push, no divergence prompt.
+- `save` becomes a thin wrapper: call commit's shared function, then push's distribute path.
+- `-m`, `-i`, `[save] default-mode` behave identically in both commands (same code path).
+
+**Out of scope:** A matching `stage`/`add` command — staging without commit has no useful stopping point.
+
+**Module dependencies:** refactor inside `commands/save.rs`; `commands/commit.rs` consumes the extraction.
+
+**Acceptance:**
+- `polydot commit -m "msg"` commits all dirty repos, leaves them ahead (not pushed).
+- `polydot commit` with default-mode set prompts per-repo or shared as configured.
+- `polydot save` behavior unchanged (all existing save tests still green).
+- `polydot push` after `commit` distributes the commits.
+- Unit + integration coverage for the new command mirrors save's.
+
+**Estimated effort:** 1-2 sessions — mostly refactor + thin new binding.
 
 ---
 

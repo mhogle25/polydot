@@ -6,6 +6,10 @@
 //   - WrongTarget   → prompt user (overwrite / backup / adopt / skip / quit)
 //   - UnmanagedFile → same prompt (plus diff if it's a regular file)
 //   - UnmanagedDir  → same prompt (no diff for dirs)
+//   - BrokenSource  → dangling symlink — source was deleted or renamed in
+//                     the repo. Offer [r]emove / [s]kip / [q]uit only;
+//                     overwrite/backup/adopt all fail to rebuild since
+//                     there's no source to point at.
 //
 // At end-of-run, print a one-line summary of created / resolved / skipped
 // counts. `quit` aborts the remaining work but exits 0 — the user asked
@@ -175,6 +179,29 @@ where
     }
 }
 
+fn build_menu_for_broken_source() -> Menu<Choice> {
+    let options = vec![
+        MenuOption::new(
+            'r',
+            "[r]emove — delete the dangling symlink",
+            Choice::Action(Action::Remove),
+        ),
+        MenuOption::new(
+            's',
+            "[s]kip   — leave this one alone for now",
+            Choice::Action(Action::Skip),
+        ),
+        MenuOption::new(
+            'q',
+            "[q]uit   — stop processing remaining links",
+            Choice::Quit,
+        ),
+    ];
+    Menu::new(options)
+        .default_shortcut('s')
+        .cancel_shortcut('q')
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Choice {
     Action(Action),
@@ -183,6 +210,12 @@ pub(crate) enum Choice {
 }
 
 fn build_menu(ctx: &PromptCtx<'_>) -> Menu<Choice> {
+    // Broken-source symlinks get a specialized menu — overwrite/backup/adopt
+    // all try to rebuild the symlink, which would just recreate the dangling
+    // state with no source to point at.
+    if matches!(ctx.state, LinkState::BrokenSource { .. }) {
+        return build_menu_for_broken_source();
+    }
     // Adopt moves the existing target INTO the repo at `expected_source`.
     // If something already lives there, the move would clobber it — so the
     // option is structurally impossible and shouldn't be offered.
@@ -240,6 +273,9 @@ fn print_conflict_header(repo_name: &str, expected_source: &Path, to: &Path, sta
         LinkState::WrongTarget { actual } => {
             format!("is a symlink → {}", actual.display())
         }
+        LinkState::BrokenSource { source } => {
+            format!("is a dangling symlink — source missing: {}", source.display())
+        }
         LinkState::UnmanagedConflict => match std::fs::symlink_metadata(to) {
             Ok(m) if m.is_dir() => "exists as a directory".to_string(),
             Ok(_) => "exists as a regular file".to_string(),
@@ -250,7 +286,9 @@ fn print_conflict_header(repo_name: &str, expected_source: &Path, to: &Path, sta
     };
     println!();
     println!("conflict ({repo_name}): {} {}", to.display(), what);
-    println!("  → would symlink from {}", expected_source.display());
+    if !matches!(state, LinkState::BrokenSource { .. }) {
+        println!("  → would symlink from {}", expected_source.display());
+    }
     println!();
 }
 
@@ -286,6 +324,9 @@ fn report_apply(outcome: &ApplyOutcome, expected_source: &Path, to: &Path) {
                 to.display(),
                 expected_source.display()
             );
+        }
+        ApplyOutcome::Removed => {
+            println!("  removed: {}", to.display());
         }
     }
 }
@@ -568,6 +609,60 @@ mod tests {
         };
         let menu = build_menu(&ctx);
         assert!(!shortcuts(&menu).contains(&'d'));
+    }
+
+    #[test]
+    fn build_menu_for_broken_source_offers_only_remove_skip_quit() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("repo/gone");
+        // Source is deliberately absent.
+        let to = tmp.path().join("home/link");
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        unix_fs::symlink(&source, &to).unwrap();
+        let ctx = PromptCtx {
+            state: &LinkState::BrokenSource {
+                source: source.clone(),
+            },
+            expected_source: &source,
+            to: &to,
+        };
+        let menu = build_menu(&ctx);
+        assert_eq!(shortcuts(&menu), vec!['r', 's', 'q']);
+    }
+
+    #[test]
+    fn broken_source_remove_deletes_dangling_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        // Dangling symlink: source path in repo does not exist.
+        let to = tmp.path().join("home/dangling");
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        unix_fs::symlink(repo.join("gone"), &to).unwrap();
+
+        let config = config_for(&repo, &[("gone", &to)]);
+        let mut prompter = scripted(vec![Choice::Action(Action::Remove)]);
+        run_with(&config, &mut prompter).unwrap();
+
+        assert!(fs::symlink_metadata(&to).is_err());
+    }
+
+    #[test]
+    fn broken_source_skip_leaves_dangling_symlink_in_place() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let to = tmp.path().join("home/dangling");
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        unix_fs::symlink(repo.join("gone"), &to).unwrap();
+
+        let config = config_for(&repo, &[("gone", &to)]);
+        let mut prompter = scripted(vec![Choice::Action(Action::Skip)]);
+        run_with(&config, &mut prompter).unwrap();
+
+        // Symlink still present (dangling).
+        let meta = fs::symlink_metadata(&to).unwrap();
+        assert!(meta.file_type().is_symlink());
     }
 
     #[test]

@@ -125,7 +125,7 @@ impl Config {
 //
 // SSH (`git@`, `ssh://`) and plain `http://` are rejected with a helpful
 // hint pointing at the supported alternatives.
-fn validate_repo_url(name: &str, url: &str) -> Result<()> {
+pub(crate) fn validate_repo_url(name: &str, url: &str) -> Result<()> {
     if url.starts_with("https://") || url.starts_with("file://") {
         return Ok(());
     }

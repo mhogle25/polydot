@@ -189,6 +189,9 @@ fn format_link_detail(link: &LinkReport, index: usize) -> Option<String> {
         LinkResult::Resolved(LinkState::WrongTarget { actual }) => {
             format!("wrong target → {}", actual.display())
         }
+        LinkResult::Resolved(LinkState::BrokenSource { source }) => {
+            format!("broken — source gone: {}", source.display())
+        }
         LinkResult::Resolved(LinkState::UnmanagedConflict) => {
             "conflict (not a symlink)".to_string()
         }

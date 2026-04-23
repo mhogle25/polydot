@@ -81,7 +81,11 @@ pub fn run(config: &Config, message: Option<&str>, interactive: bool) -> anyhow:
     )
 }
 
-fn resolve_mode(message: Option<&str>, interactive: bool, config: &Config) -> anyhow::Result<Mode> {
+pub(crate) fn resolve_mode(
+    message: Option<&str>,
+    interactive: bool,
+    config: &Config,
+) -> anyhow::Result<Mode> {
     if interactive {
         return Ok(Mode::PerRepo);
     }
@@ -251,35 +255,13 @@ where
     C: FnMut(&CommitPromptCtx<'_>) -> anyhow::Result<CommitChoice>,
     S: FnMut(&Path) -> anyhow::Result<()>,
 {
-    let clone_path = resolve_clone_path(name, repo_cfg, env)?;
-    if !clone_path.exists() {
-        anyhow::bail!(
-            "clone path {} does not exist — run `polydot sync` first",
-            clone_path.display()
-        );
-    }
-    let repo =
-        git::open(&clone_path).with_context(|| format!("opening {}", clone_path.display()))?;
-    git::ensure_origin_speakable(&repo, &repo_cfg.repo)?;
-
-    let message = match mode {
-        Mode::Shared(msg) => Some(msg.clone()),
-        Mode::PerRepo => match resolve_per_repo_message(name, &clone_path, &repo, commit_prompter)?
-        {
-            PerRepoOutcome::Message(msg) => Some(msg),
-            PerRepoOutcome::Skip => return Ok(RepoOutcome::SkippedClean),
-            PerRepoOutcome::Abort => return Ok(RepoOutcome::AbortedClean),
-            // Tree clean → fall through to attempt push of any pre-existing commits.
-            PerRepoOutcome::NothingToCommit => None,
-        },
-    };
-
-    let committed = match message {
-        Some(msg) => git::commit_all(&repo, &msg)
-            .with_context(|| format!("committing dirty changes in `{name}`"))?
-            .is_some(),
-        None => false,
-    };
+    let (repo, clone_path, committed) =
+        match commit_phase(name, repo_cfg, mode, env, commit_prompter)? {
+            CommitPhaseOutcome::Committed { repo, clone_path } => (repo, clone_path, true),
+            CommitPhaseOutcome::NothingToCommit { repo, clone_path } => (repo, clone_path, false),
+            CommitPhaseOutcome::UserSkipped => return Ok(RepoOutcome::SkippedClean),
+            CommitPhaseOutcome::UserAborted => return Ok(RepoOutcome::AbortedClean),
+        };
 
     if !committed && !has_unpushed_commits(&repo) {
         println!("up-to-date          {name}");
@@ -308,6 +290,75 @@ where
             rejection_prompter,
             shell_launcher,
         ),
+    }
+}
+
+/// Outcome of the commit-only phase shared by `save` and `commit`. Both
+/// commands need to turn a repo + a mode into either "a fresh commit was
+/// made", "tree was clean", or "user bailed out of per-repo mode". `save`
+/// then proceeds to push; `commit` stops here.
+pub(crate) enum CommitPhaseOutcome {
+    /// A new commit was created on top of HEAD.
+    Committed {
+        repo: Repository,
+        clone_path: PathBuf,
+    },
+    /// Tree was clean; no commit made. May still have unpushed commits —
+    /// the caller decides what that means for them.
+    NothingToCommit {
+        repo: Repository,
+        clone_path: PathBuf,
+    },
+    /// Per-repo mode: user chose [s]kip at the message prompt.
+    UserSkipped,
+    /// Per-repo mode: user chose [a]bort at the message prompt.
+    UserAborted,
+}
+
+pub(crate) fn commit_phase<C>(
+    name: &str,
+    repo_cfg: &RepoConfig,
+    mode: &Mode,
+    env: &SystemEnv,
+    commit_prompter: &mut C,
+) -> anyhow::Result<CommitPhaseOutcome>
+where
+    C: FnMut(&CommitPromptCtx<'_>) -> anyhow::Result<CommitChoice>,
+{
+    let clone_path = resolve_clone_path(name, repo_cfg, env)?;
+    if !clone_path.exists() {
+        anyhow::bail!(
+            "clone path {} does not exist — run `polydot sync` first",
+            clone_path.display()
+        );
+    }
+    let repo =
+        git::open(&clone_path).with_context(|| format!("opening {}", clone_path.display()))?;
+    git::ensure_origin_speakable(&repo, &repo_cfg.repo)?;
+
+    let message = match mode {
+        Mode::Shared(msg) => Some(msg.clone()),
+        Mode::PerRepo => match resolve_per_repo_message(name, &clone_path, &repo, commit_prompter)?
+        {
+            PerRepoOutcome::Message(msg) => Some(msg),
+            PerRepoOutcome::Skip => return Ok(CommitPhaseOutcome::UserSkipped),
+            PerRepoOutcome::Abort => return Ok(CommitPhaseOutcome::UserAborted),
+            // Tree clean → fall through; caller (save) may still push pre-existing commits.
+            PerRepoOutcome::NothingToCommit => None,
+        },
+    };
+
+    let committed = match message {
+        Some(msg) => git::commit_all(&repo, &msg)
+            .with_context(|| format!("committing dirty changes in `{name}`"))?
+            .is_some(),
+        None => false,
+    };
+
+    if committed {
+        Ok(CommitPhaseOutcome::Committed { repo, clone_path })
+    } else {
+        Ok(CommitPhaseOutcome::NothingToCommit { repo, clone_path })
     }
 }
 
@@ -581,7 +632,7 @@ enum CommitMenuChoice {
 /// line from stdin. `[v]iew` returns to the caller loop to print the diff
 /// and re-prompt. Header is printed once by the caller before the first
 /// prompt — re-prompts after `[v]iew` go straight to the menu.
-fn prompt_commit_via_menu(_ctx: &CommitPromptCtx<'_>) -> anyhow::Result<CommitChoice> {
+pub(crate) fn prompt_commit_via_menu(_ctx: &CommitPromptCtx<'_>) -> anyhow::Result<CommitChoice> {
     let menu = Menu::new(vec![
         MenuOption::new(
             'm',

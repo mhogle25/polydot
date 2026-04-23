@@ -34,7 +34,7 @@ default_mode = "per-repo"  # or "shared"
 
 # Each [<name>] is a managed repo
 [claude-memory]
-repo  = "git@github.com:mhogle25/claude-memory.git"
+repo  = "https://github.com/mhogle25/claude-memory.git"
 clone = "~/dev/config/claude-memory"
 
 [[claude-memory.links]]
@@ -54,17 +54,17 @@ from = "shared"
 to   = "~/.claude/projects/${~ | slug}/memory"
 
 [nvim-config]
-repo  = "git@github.com:mhogle25/nvim-config.git"
+repo  = "https://github.com/mhogle25/nvim-config.git"
 clone = "~/dev/config/nvim-config"
 links = [{ from = ".", to = "~/.config/nvim" }]
 
 [claude-config]
-repo  = "git@github.com:mhogle25/claude-config.git"
+repo  = "https://github.com/mhogle25/claude-config.git"
 clone = "~/dev/config/claude-config"
 links = [{ from = "CLAUDE.md", to = "~/.claude/CLAUDE.md" }]
 
 [polydot-config]
-repo  = "git@github.com:mhogle25/polydot-config.git"
+repo  = "https://github.com/mhogle25/polydot-config.git"
 clone = "~/dev/config/polydot-config"
 links = [{ from = "config.toml", to = "~/.config/polydot/config.toml" }]
 ```
@@ -91,9 +91,11 @@ Multi-arg transforms and plugins deferred until first real use case.
 ## Commands
 
 ```
-polydot bootstrap <config-repo-url>
+polydot bootstrap <config-repo-url> [--to <path>]
     Clone the config repo, symlink config.toml into place, then sync + link
     everything else. The "new machine" entry point.
+    URL must be `https://` (authenticated via PAT) or `file://`.
+    --to defaults to $XDG_DATA_HOME/polydot/config.
 
 polydot sync
     Clone missing repos. Pull existing repos. On conflict during pull:
@@ -184,9 +186,9 @@ After all dirty repos: `3 repos pushed, 1 skipped, 0 failed`.
    (Or download a release binary once the project ships releases.)
 3. Bootstrap:
    ```sh
-   polydot bootstrap git@github.com:mhogle25/polydot-config.git
+   polydot bootstrap https://github.com/mhogle25/polydot-config.git --to ~/dev/config/polydot-config
    ```
-   This clones polydot-config to `~/dev/config/polydot-config`, symlinks `config.toml` into `~/.config/polydot/`, then runs `polydot sync && polydot link` to pick up everything else.
+   This clones polydot-config to the path given by `--to` (default: `$XDG_DATA_HOME/polydot/config`), symlinks `config.toml` into `~/.config/polydot/`, then runs `polydot sync && polydot link` to pick up everything else.
 
 One manual step (install binary), one automated bootstrap command, fully synced from there.
 

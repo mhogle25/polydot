@@ -6,13 +6,15 @@
 # "managed" clone that polydot operates on. Also writes a minimal config.toml
 # pointing at the managed clone.
 #
-# Usage: bash scripts/smoke/divergence-fixture.sh [clean|conflict]
+# Usage: bash scripts/smoke/divergence-fixture.sh [clean|conflict|dirty]
 #   clean     — managed adds local.txt, helper adds line to notes.txt  (rebase succeeds)
 #   conflict  — both sides touch notes.txt on the same line            (rebase aborts)
+#   dirty     — managed has uncommitted changes, upstream untouched    (commit/save/push)
 #
 # After running, exercise interactively:
 #   ./target/debug/polydot --config $ROOT/config.toml push
 #   ./target/debug/polydot --config $ROOT/config.toml save
+#   ./target/debug/polydot --config $ROOT/config.toml commit -m "msg"
 set -e
 ROOT=${POLYDOT_SMOKE_ROOT:-/tmp/polydot-smoke-divergence}
 REMOTE_URL="file://$ROOT/remote.git"
@@ -64,6 +66,11 @@ case "$SCENARIO" in
     echo "line 1 changed by managed" > notes.txt
     git add notes.txt
     git commit -q -m "managed: rewrite notes.txt line 1"
+    ;;
+  dirty)
+    cd "$ROOT/managed"
+    echo "dirty edit, not yet committed" >> notes.txt
+    echo "brand new file, not yet staged" > scratch.txt
     ;;
   *)
     echo "unknown scenario: $SCENARIO" >&2
