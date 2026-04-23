@@ -486,7 +486,7 @@ fn run_rebase_then_push(
             match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
                 PushOutcome::Pushed => {
                     let suffix = if committed {
-                        "rebased + pushed (commit preserved)"
+                        "rebased + pushed, commit preserved"
                     } else {
                         "rebased + pushed"
                     };
