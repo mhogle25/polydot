@@ -168,20 +168,22 @@ impl Config {
 
         for (link_repo, from, to_path) in &links {
             for (clone_repo, clone_path) in &clones {
-                if !same_or_inside(to_path, clone_path) {
+                let relation = if to_path == clone_path {
+                    "equals"
+                } else if is_inside(to_path, clone_path) {
+                    "is inside"
+                } else {
                     continue;
-                }
+                };
                 if link_repo == clone_repo {
                     return Err(Error::Config(format!(
-                        "self-referential link: [{link_repo}] `{from}` targets `{}`, \
-                         which is inside its own clone `{}`",
+                        "self-referential link: [{link_repo}] `{from}` → `{}` {relation} its own clone `{}`",
                         to_path.display(),
                         clone_path.display(),
                     )));
                 }
                 return Err(Error::Config(format!(
-                    "cross-repo conflict: [{link_repo}] `{from}` targets `{}`, \
-                     which is inside [{clone_repo}]'s clone `{}`",
+                    "cross-repo conflict: [{link_repo}] `{from}` → `{}` {relation} [{clone_repo}]'s clone `{}`",
                     to_path.display(),
                     clone_path.display(),
                 )));
@@ -222,10 +224,6 @@ impl Config {
 // component boundary, so `/ab` does not count as inside `/a`.
 fn is_inside(child: &Path, parent: &Path) -> bool {
     child != parent && child.starts_with(parent)
-}
-
-fn same_or_inside(a: &Path, b: &Path) -> bool {
-    a == b || is_inside(a, b)
 }
 
 // Accepted URL schemes:
