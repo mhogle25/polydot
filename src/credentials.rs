@@ -4,15 +4,22 @@
 //   1. Env var (currently only `GITHUB_TOKEN` for github.com — same name
 //      `gh` and most GitHub tooling honor, so one PAT can serve everything).
 //   2. `~/.config/polydot/credentials.toml`, table `[hosts."<host>"]`.
-//   3. Nothing → caller decides whether to error.
+//   3. `git credential fill` — consults whatever credential helper git is
+//      configured with (osxkeychain, libsecret, manager-core, gh, etc.).
+//      `GIT_TERMINAL_PROMPT=0` keeps it non-interactive; a missing `git`
+//      binary, an unconfigured helper, or an empty reply all fall through
+//      cleanly to step 4.
+//   4. Nothing → caller decides whether to error.
 //
 // File must be mode 0600 on Unix; looser permissions are a hard refusal,
 // not a warning. The file is treated as a secret store.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
@@ -71,9 +78,12 @@ impl Credentials {
     }
 
     pub fn for_host(&self, host: &str) -> Option<HostCredentials> {
-        resolve(host, &self.hosts, &|key| {
-            std::env::var(key).ok().filter(|s| !s.is_empty())
-        })
+        resolve(
+            host,
+            &self.hosts,
+            &|key| std::env::var(key).ok().filter(|s| !s.is_empty()),
+            &git_credential_fill,
+        )
     }
 
     pub fn require_for_host(&self, host: &str) -> Result<HostCredentials> {
@@ -85,6 +95,7 @@ fn resolve(
     host: &str,
     file_creds: &BTreeMap<String, HostCredentials>,
     env: &dyn Fn(&str) -> Option<String>,
+    helper: &dyn Fn(&str) -> Option<HostCredentials>,
 ) -> Option<HostCredentials> {
     if host == GITHUB_HOST
         && let Some(token) = env(GITHUB_TOKEN_ENV)
@@ -94,27 +105,91 @@ fn resolve(
             token,
         });
     }
-    file_creds.get(host).cloned()
+    if let Some(creds) = file_creds.get(host) {
+        return Some(creds.clone());
+    }
+    helper(host)
+}
+
+// Ask git's configured credential helper for a host's credentials. Returns
+// None if git isn't on PATH, the helper isn't configured, the helper has
+// no stored credentials, or the reply is unparsable. Never errors — this
+// step is a best-effort fallback and callers treat absence as "try the
+// next step" (which for `resolve` is "return None and let the caller
+// produce the user-facing missing-credentials error").
+fn git_credential_fill(host: &str) -> Option<HostCredentials> {
+    let mut child = Command::new("git")
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    {
+        let mut stdin = child.stdin.take()?;
+        writeln!(stdin, "protocol=https").ok()?;
+        writeln!(stdin, "host={host}").ok()?;
+        writeln!(stdin).ok()?;
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let reply = std::str::from_utf8(&output.stdout).ok()?;
+    parse_credential_reply(reply)
+}
+
+// Parse a `git credential fill` reply block: `key=value` lines terminated
+// by a blank line or EOF. `password` is required; `username` defaults to
+// `x-access-token` when absent (what GitHub expects for token-only auth).
+fn parse_credential_reply(reply: &str) -> Option<HostCredentials> {
+    let mut username = None;
+    let mut password = None;
+    for line in reply.lines() {
+        if line.is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "username" => username = Some(value.to_string()),
+            "password" => password = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(HostCredentials {
+        username: username.unwrap_or_else(|| DEFAULT_USERNAME.to_string()),
+        token: password?,
+    })
 }
 
 fn missing_credentials(host: &str) -> Error {
     if host == GITHUB_HOST {
         Error::Config(format!(
             "no credentials configured for `{host}`.\n\
-             Generate a personal access token at https://github.com/settings/tokens, then either:\n  \
+             Generate a personal access token at https://github.com/settings/tokens, then pick one:\n  \
              - export {GITHUB_TOKEN_ENV}=<token>\n  \
-             - or add to ~/.config/polydot/credentials.toml:\n      \
+             - add to ~/.config/polydot/credentials.toml:\n      \
              [hosts.\"{host}\"]\n      \
              username = \"<your-github-username>\"\n      \
-             token = \"<token>\""
+             token = \"<token>\"\n  \
+             - or store it via a git credential helper (e.g. macOS:\n      \
+             `git config --global credential.helper osxkeychain`, then clone once to prime)"
         ))
     } else {
         Error::Config(format!(
             "no credentials configured for `{host}`.\n\
-             Add to ~/.config/polydot/credentials.toml:\n  \
-             [hosts.\"{host}\"]\n  \
-             username = \"<username>\"\n  \
-             token = \"<token>\""
+             Pick one:\n  \
+             - add to ~/.config/polydot/credentials.toml:\n      \
+             [hosts.\"{host}\"]\n      \
+             username = \"<username>\"\n      \
+             token = \"<token>\"\n  \
+             - or store it via a git credential helper for `{host}`"
         ))
     }
 }
@@ -154,6 +229,10 @@ mod tests {
         move |key| map.get(key).map(|s| s.to_string())
     }
 
+    fn no_helper(_: &str) -> Option<HostCredentials> {
+        None
+    }
+
     fn host_creds(username: &str, token: &str) -> HostCredentials {
         HostCredentials {
             username: username.to_string(),
@@ -170,7 +249,7 @@ mod tests {
         );
         let env = stub_env([(GITHUB_TOKEN_ENV, "env-token")].into_iter().collect());
 
-        let got = resolve("github.com", &hosts, &env).unwrap();
+        let got = resolve("github.com", &hosts, &env, &no_helper).unwrap();
         assert_eq!(got.token, "env-token");
         assert_eq!(got.username, DEFAULT_USERNAME);
     }
@@ -181,7 +260,7 @@ mod tests {
         hosts.insert("github.com".to_string(), host_creds("alice", "file-token"));
         let env = stub_env(HashMap::new());
 
-        let got = resolve("github.com", &hosts, &env).unwrap();
+        let got = resolve("github.com", &hosts, &env, &no_helper).unwrap();
         assert_eq!(got.token, "file-token");
         assert_eq!(got.username, "alice");
     }
@@ -190,14 +269,14 @@ mod tests {
     fn missing_both_returns_none() {
         let hosts = BTreeMap::new();
         let env = stub_env(HashMap::new());
-        assert!(resolve("github.com", &hosts, &env).is_none());
+        assert!(resolve("github.com", &hosts, &env, &no_helper).is_none());
     }
 
     #[test]
     fn env_var_only_applies_to_github() {
         let hosts = BTreeMap::new();
         let env = stub_env([(GITHUB_TOKEN_ENV, "ghp_x")].into_iter().collect());
-        assert!(resolve("gitlab.com", &hosts, &env).is_none());
+        assert!(resolve("gitlab.com", &hosts, &env, &no_helper).is_none());
     }
 
     #[test]
@@ -206,9 +285,94 @@ mod tests {
         hosts.insert("gitlab.com".to_string(), host_creds("u", "glpat"));
         let env = stub_env(HashMap::new());
 
-        let got = resolve("gitlab.com", &hosts, &env).unwrap();
+        let got = resolve("gitlab.com", &hosts, &env, &no_helper).unwrap();
         assert_eq!(got.token, "glpat");
         assert_eq!(got.username, "u");
+    }
+
+    #[test]
+    fn helper_consulted_when_env_and_file_empty() {
+        let hosts = BTreeMap::new();
+        let env = stub_env(HashMap::new());
+        let helper = |host: &str| {
+            assert_eq!(host, "github.com");
+            Some(host_creds("from-helper", "helper-token"))
+        };
+
+        let got = resolve("github.com", &hosts, &env, &helper).unwrap();
+        assert_eq!(got.token, "helper-token");
+        assert_eq!(got.username, "from-helper");
+    }
+
+    #[test]
+    fn file_beats_helper_when_both_present() {
+        let mut hosts = BTreeMap::new();
+        hosts.insert("gitlab.com".to_string(), host_creds("u", "file-token"));
+        let env = stub_env(HashMap::new());
+        let helper = |_: &str| Some(host_creds("ignored", "ignored"));
+
+        let got = resolve("gitlab.com", &hosts, &env, &helper).unwrap();
+        assert_eq!(got.token, "file-token");
+    }
+
+    #[test]
+    fn env_beats_helper_for_github() {
+        let hosts = BTreeMap::new();
+        let env = stub_env([(GITHUB_TOKEN_ENV, "env-token")].into_iter().collect());
+        let helper = |_: &str| Some(host_creds("ignored", "ignored"));
+
+        let got = resolve("github.com", &hosts, &env, &helper).unwrap();
+        assert_eq!(got.token, "env-token");
+    }
+
+    #[test]
+    fn helper_returning_none_falls_through() {
+        let hosts = BTreeMap::new();
+        let env = stub_env(HashMap::new());
+        assert!(resolve("gitlab.com", &hosts, &env, &no_helper).is_none());
+    }
+
+    #[test]
+    fn parse_reply_extracts_username_and_password() {
+        let reply = "protocol=https\nhost=github.com\nusername=alice\npassword=ghp_secret\n";
+        let got = parse_credential_reply(reply).unwrap();
+        assert_eq!(got.username, "alice");
+        assert_eq!(got.token, "ghp_secret");
+    }
+
+    #[test]
+    fn parse_reply_missing_password_returns_none() {
+        let reply = "protocol=https\nhost=github.com\nusername=alice\n";
+        assert!(parse_credential_reply(reply).is_none());
+    }
+
+    #[test]
+    fn parse_reply_missing_username_defaults_to_x_access_token() {
+        let reply = "protocol=https\nhost=github.com\npassword=ghp_secret\n";
+        let got = parse_credential_reply(reply).unwrap();
+        assert_eq!(got.username, DEFAULT_USERNAME);
+        assert_eq!(got.token, "ghp_secret");
+    }
+
+    #[test]
+    fn parse_reply_stops_at_blank_line() {
+        let reply = "username=alice\npassword=first\n\nusername=bob\npassword=second\n";
+        let got = parse_credential_reply(reply).unwrap();
+        assert_eq!(got.username, "alice");
+        assert_eq!(got.token, "first");
+    }
+
+    #[test]
+    fn parse_reply_ignores_malformed_lines() {
+        let reply = "protocol=https\nno-equals-here\nusername=alice\npassword=ghp\n";
+        let got = parse_credential_reply(reply).unwrap();
+        assert_eq!(got.username, "alice");
+        assert_eq!(got.token, "ghp");
+    }
+
+    #[test]
+    fn parse_reply_empty_input_returns_none() {
+        assert!(parse_credential_reply("").is_none());
     }
 
     #[test]
@@ -311,5 +475,11 @@ token = "t"
         let msg = err.to_string();
         assert!(!msg.contains("github.com/settings/tokens"));
         assert!(msg.contains("gitlab.com"));
+    }
+
+    #[test]
+    fn missing_credentials_message_mentions_git_credential_helper() {
+        let err = missing_credentials("github.com");
+        assert!(err.to_string().contains("credential helper"));
     }
 }

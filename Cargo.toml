@@ -2,6 +2,7 @@
 name = "polydot"
 version = "1.1.1"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Mitchell Hogle <mitchellhogle@gmail.com>"]
 description = "Git orchestrator for managing N dotfile repos with one command each"
 license = "GPL-3.0-or-later"
