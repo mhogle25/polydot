@@ -29,9 +29,6 @@ Decided. Rationale: mature CLI ecosystem (`clap`, `serde` + `toml`, `git2`, `dir
 ```toml
 # ~/.config/polydot/config.toml
 
-[save]
-default_mode = "per-repo"  # or "shared"
-
 # Each [<name>] is a managed repo
 [claude-memory]
 repo  = "https://github.com/mhogle25/claude-memory.git"
@@ -109,11 +106,10 @@ polydot status
     Per-repo summary: clean/dirty, ahead/behind origin, link state
     (correct / wrong target / missing / unmanaged-conflict).
 
-polydot save [-m "<message>"] [-i]
+polydot save [-m "<message>"]
     Commit dirty changes + push, across all managed repos.
-    Default mode comes from config (per-repo or shared).
-    -m "<msg>" forces shared message regardless of default.
-    -i forces interactive (per-repo prompts) regardless of default.
+    No flag: per-repo interactive prompt for each dirty repo.
+    -m "<msg>": shared mode — one commit message across all dirty repos.
 
 polydot push
     Push already-committed work across all repos. No new commits.

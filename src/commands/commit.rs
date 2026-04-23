@@ -1,10 +1,9 @@
 // `polydot commit` — stage + commit dirty changes across all managed repos.
 //
-// Same mode resolution as `save` (shared `-m`, per-repo `-i`, or
-// `[save] default-mode`). The difference is that commit stops after the
-// commit step — nothing is pushed, no divergence prompt is raised. Any
-// freshly-made commits sit on local `main` until the user runs `push`
-// (or `save` on a later cycle).
+// Same mode selection as `save` (shared `-m` or per-repo no-flag). The
+// difference is that commit stops after the commit step — nothing is
+// pushed, no divergence prompt is raised. Any freshly-made commits sit on
+// local `main` until the user runs `push` (or `save` on a later cycle).
 //
 // Intended for offline workflows or review-before-push patterns. For the
 // combined commit+push flow, use `save`.
@@ -32,8 +31,8 @@ impl Summary {
     }
 }
 
-pub fn run(config: &Config, message: Option<&str>, interactive: bool) -> anyhow::Result<()> {
-    let mode = resolve_mode(message, interactive, config)?;
+pub fn run(config: &Config, message: Option<&str>) -> anyhow::Result<()> {
+    let mode = resolve_mode(message);
     run_with(config, &mode, &mut save::prompt_commit_via_menu)
 }
 
@@ -86,7 +85,7 @@ where
 mod tests {
     use super::*;
     use crate::commands::save::CommitChoice;
-    use crate::config::{Config, RepoConfig, SaveMode};
+    use crate::config::{Config, RepoConfig};
     use crate::paths::parse;
     use git2::{BranchType, Repository};
     use std::collections::{BTreeMap, VecDeque};
@@ -110,7 +109,6 @@ mod tests {
         Config {
             path: None,
             repos: map,
-            save: Default::default(),
         }
     }
 
@@ -438,25 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn shared_default_mode_without_message_errors() {
-        let mut config = config_with(vec![]);
-        config.save.default_mode = Some(SaveMode::Shared);
-        // run() — not run_with — resolves the mode, so use it here.
-        let err = run(&config, None, false).unwrap_err();
-        assert!(err.to_string().contains("requires a `-m"));
-    }
-
-    #[test]
-    fn per_repo_default_mode_without_flags_selects_per_repo() {
+    fn no_flag_defaults_to_per_repo() {
         let (_remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
         fs::write(b_path.join("notes.md"), "fresh\n").unwrap();
 
-        let mut config = config_with(vec![("r", url, &b_path)]);
-        config.save.default_mode = Some(SaveMode::PerRepo);
+        let config = config_with(vec![("r", url, &b_path)]);
 
-        // run() reads default-mode and dispatches; can't inject prompter,
-        // so we indirectly verify by noting the production path is reachable.
-        // Direct path: run_with + PerRepo mode, with a scripted skip.
         run_with(
             &config,
             &Mode::PerRepo,

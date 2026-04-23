@@ -1,9 +1,8 @@
 // `polydot save` — commit dirty changes + push, across all managed repos.
 //
-// Mode resolution (first match wins):
+// Mode:
 //   -m "<msg>"   → shared: one commit message for every dirty repo.
-//   -i           → per-repo: prompt per dirty repo for a message.
-//   neither      → fall back to `[save] default-mode` in config.
+//   (no flag)    → per-repo: prompt per dirty repo for a message.
 //
 // Per repo in shared mode:
 //   - Stage all + commit (skipped if clean) → push.
@@ -32,7 +31,7 @@ use std::process::Command;
 use anyhow::Context;
 use git2::Repository;
 
-use crate::config::{Config, RepoConfig, SaveMode};
+use crate::config::{Config, RepoConfig};
 use crate::credentials::Credentials;
 use crate::git::{self, DiffSummary, PushOutcome, RebaseOutcome};
 use crate::paths::{SystemEnv, evaluate};
@@ -64,12 +63,12 @@ impl Summary {
 pub(crate) enum Mode {
     /// One message for every dirty repo (from `-m`).
     Shared(String),
-    /// Per-repo prompt (from `-i` or `[save] default-mode = "per-repo"`).
+    /// Per-repo prompt (no flag).
     PerRepo,
 }
 
-pub fn run(config: &Config, message: Option<&str>, interactive: bool) -> anyhow::Result<()> {
-    let mode = resolve_mode(message, interactive, config)?;
+pub fn run(config: &Config, message: Option<&str>) -> anyhow::Result<()> {
+    let mode = resolve_mode(message);
     let creds = Credentials::load_default().context("loading credentials")?;
     run_with(
         config,
@@ -81,29 +80,10 @@ pub fn run(config: &Config, message: Option<&str>, interactive: bool) -> anyhow:
     )
 }
 
-pub(crate) fn resolve_mode(
-    message: Option<&str>,
-    interactive: bool,
-    config: &Config,
-) -> anyhow::Result<Mode> {
-    if interactive {
-        return Ok(Mode::PerRepo);
-    }
-    if let Some(msg) = message {
-        return Ok(Mode::Shared(msg.to_string()));
-    }
-    match config.save.default_mode {
-        Some(SaveMode::PerRepo) => Ok(Mode::PerRepo),
-        Some(SaveMode::Shared) => {
-            anyhow::bail!(
-                "`[save] default-mode = \"shared\"` requires a `-m <message>` \
-                 — pass one, or use `-i` for per-repo prompts"
-            )
-        }
-        None => anyhow::bail!(
-            "pass `-m <message>` for a shared commit message, `-i` for per-repo prompts, \
-             or set `[save] default-mode` in config"
-        ),
+pub(crate) fn resolve_mode(message: Option<&str>) -> Mode {
+    match message {
+        Some(msg) => Mode::Shared(msg.to_string()),
+        None => Mode::PerRepo,
     }
 }
 
@@ -734,7 +714,6 @@ mod tests {
         Config {
             path: None,
             repos: map,
-            save: Default::default(),
         }
     }
 
@@ -1244,49 +1223,13 @@ mod tests {
     // ---- Mode resolution ----
 
     #[test]
-    fn resolve_mode_message_alone_is_shared() {
-        let config = config_with(vec![]);
-        let mode = resolve_mode(Some("hi"), false, &config).unwrap();
-        assert_eq!(mode, Mode::Shared("hi".to_string()));
+    fn resolve_mode_message_is_shared() {
+        assert_eq!(resolve_mode(Some("hi")), Mode::Shared("hi".to_string()));
     }
 
     #[test]
-    fn resolve_mode_interactive_alone_is_per_repo() {
-        let config = config_with(vec![]);
-        let mode = resolve_mode(None, true, &config).unwrap();
-        assert_eq!(mode, Mode::PerRepo);
-    }
-
-    #[test]
-    fn resolve_mode_interactive_wins_over_message() {
-        // CLI prevents this combination via clap's conflicts_with, but the
-        // resolver should still favor interactive for defense-in-depth.
-        let config = config_with(vec![]);
-        let mode = resolve_mode(Some("hi"), true, &config).unwrap();
-        assert_eq!(mode, Mode::PerRepo);
-    }
-
-    #[test]
-    fn resolve_mode_no_flags_no_default_errors() {
-        let config = config_with(vec![]);
-        let err = resolve_mode(None, false, &config).unwrap_err();
-        assert!(err.to_string().contains("`-m"));
-    }
-
-    #[test]
-    fn resolve_mode_falls_back_to_per_repo_default() {
-        let mut config = config_with(vec![]);
-        config.save.default_mode = Some(SaveMode::PerRepo);
-        let mode = resolve_mode(None, false, &config).unwrap();
-        assert_eq!(mode, Mode::PerRepo);
-    }
-
-    #[test]
-    fn resolve_mode_shared_default_without_message_errors() {
-        let mut config = config_with(vec![]);
-        config.save.default_mode = Some(SaveMode::Shared);
-        let err = resolve_mode(None, false, &config).unwrap_err();
-        assert!(err.to_string().contains("requires a `-m"));
+    fn resolve_mode_none_is_per_repo() {
+        assert_eq!(resolve_mode(None), Mode::PerRepo);
     }
 
     // ---- Per-repo mode flow ----

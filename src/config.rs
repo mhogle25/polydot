@@ -19,25 +19,6 @@ use crate::paths::{Env, Expression, SystemEnv, evaluate};
 pub struct Config {
     pub path: Option<PathBuf>,
     pub repos: BTreeMap<String, RepoConfig>,
-    pub save: SaveConfig,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SaveMode {
-    /// One shared commit message for all dirty repos (via `-m`).
-    #[default]
-    Shared,
-    /// Prompt per dirty repo for a commit message.
-    PerRepo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct SaveConfig {
-    /// Mode used when `polydot save` is invoked without `-m` or `-i`.
-    /// Absent in TOML → no default; the user must pass a flag.
-    #[serde(default, rename = "default-mode")]
-    pub default_mode: Option<SaveMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,14 +44,7 @@ impl Config {
         let table: toml::Table = toml::from_str(s)?;
 
         let mut repos = BTreeMap::new();
-        let mut save = SaveConfig::default();
         for (name, value) in table {
-            if name == "save" {
-                save = value
-                    .try_into()
-                    .map_err(|e: toml::de::Error| Error::Config(format!("[save]: {e}")))?;
-                continue;
-            }
             let repo: RepoConfig = value
                 .try_into()
                 .map_err(|e: toml::de::Error| Error::Config(format!("[{name}]: {e}")))?;
@@ -78,11 +52,7 @@ impl Config {
             repos.insert(name, repo);
         }
 
-        Ok(Config {
-            path: None,
-            repos,
-            save,
-        })
+        Ok(Config { path: None, repos })
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -200,13 +170,6 @@ impl Config {
 
     pub fn to_toml_string(&self) -> Result<String> {
         let mut table = toml::Table::new();
-        if self.save.default_mode.is_some() {
-            table.insert(
-                "save".to_string(),
-                toml::Value::try_from(&self.save)
-                    .map_err(|e| Error::Config(format!("serialize [save]: {e}")))?,
-            );
-        }
         for (name, repo) in &self.repos {
             table.insert(
                 name.clone(),
@@ -399,60 +362,16 @@ clone = "~/r"
     }
 
     #[test]
-    fn save_section_is_optional() {
-        let config = Config::from_toml_str(EXAMPLE_CONFIG).unwrap();
-        assert_eq!(config.save.default_mode, None);
-    }
-
-    #[test]
-    fn save_default_mode_shared_parses() {
-        let src = r#"
-[save]
-default-mode = "shared"
-
-[r]
-repo = "https://example.com/r.git"
-clone = "~/r"
-"#;
-        let config = Config::from_toml_str(src).unwrap();
-        assert_eq!(config.save.default_mode, Some(SaveMode::Shared));
-        assert_eq!(config.repos.len(), 1);
-    }
-
-    #[test]
-    fn save_default_mode_per_repo_parses() {
+    fn save_section_no_longer_reserved() {
+        // `[save]` used to be a special top-level section. After 1.3.0 it's
+        // treated like any other repo table — so it'll fail validation
+        // because it's missing the required `repo` + `clone` fields.
         let src = r#"
 [save]
 default-mode = "per-repo"
-"#;
-        let config = Config::from_toml_str(src).unwrap();
-        assert_eq!(config.save.default_mode, Some(SaveMode::PerRepo));
-    }
-
-    #[test]
-    fn save_block_with_unknown_mode_fails() {
-        let src = r#"
-[save]
-default-mode = "bogus"
 "#;
         let err = Config::from_toml_str(src).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn save_default_mode_round_trips() {
-        let src = r#"
-[save]
-default-mode = "per-repo"
-
-[r]
-repo = "https://example.com/r.git"
-clone = "~/r"
-"#;
-        let original = Config::from_toml_str(src).unwrap();
-        let serialized = original.to_toml_string().unwrap();
-        let reparsed = Config::from_toml_str(&serialized).unwrap();
-        assert_eq!(original, reparsed);
     }
 
     #[test]

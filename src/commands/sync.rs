@@ -303,7 +303,6 @@ mod tests {
         Config {
             path: None,
             repos: map,
-            save: Default::default(),
         }
     }
 

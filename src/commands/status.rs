@@ -227,7 +227,6 @@ mod tests {
         let config = Config {
             path: None,
             repos: BTreeMap::new(),
-            save: Default::default(),
         };
         // run() prints — we can't easily capture stdout here without extra
         // wiring; format_reports([]) should be empty.
@@ -341,7 +340,6 @@ mod tests {
         let config = Config {
             path: None,
             repos,
-            save: Default::default(),
         };
 
         let env = SystemEnv;
