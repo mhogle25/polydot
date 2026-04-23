@@ -584,6 +584,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "git2",
+ "libc",
  "serde",
  "tempfile",
  "thiserror",

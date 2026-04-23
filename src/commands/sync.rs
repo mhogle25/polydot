@@ -148,14 +148,17 @@ where
         println!("cloning  {name}  →  {}", clone_path.display());
         git::clone(&repo_cfg.repo, &clone_path, creds)
             .with_context(|| format!("cloning `{name}`"))?;
+        println!();
         return Ok(RepoOutcome::Cloned);
     }
     let repo =
         git::open(&clone_path).with_context(|| format!("opening {}", clone_path.display()))?;
+    git::ensure_origin_speakable(&repo, &repo_cfg.repo)?;
     git::fetch(&repo, creds).with_context(|| format!("fetching `{name}`"))?;
     match git::try_fast_forward(&repo)? {
         FastForward::Advanced => {
             println!("pulled   {name}");
+            println!();
             Ok(RepoOutcome::Advanced)
         }
         FastForward::AlreadyUpToDate => Ok(RepoOutcome::UpToDate),
@@ -199,10 +202,12 @@ where
                 match git::try_fast_forward(repo)? {
                     FastForward::Advanced => {
                         println!("  resolved  {name} (fast-forwarded)");
+                        println!();
                         return Ok(RepoOutcome::Resolved);
                     }
                     FastForward::AlreadyUpToDate => {
                         println!("  resolved  {name}");
+                        println!();
                         return Ok(RepoOutcome::Resolved);
                     }
                     FastForward::Diverged => {
@@ -221,10 +226,9 @@ fn prompt_via_menu(ctx: &SyncPromptCtx<'_>) -> anyhow::Result<SyncChoice> {
 }
 
 fn print_diverged_header(ctx: &SyncPromptCtx<'_>) {
-    println!();
-    println!("=== {} ===", ctx.name);
-    println!("Pull failed: {}", ctx.reason);
-    println!("  repo: {}", ctx.clone_path.display());
+    println!("diverged {}", ctx.name);
+    println!("   reason: {}", ctx.reason);
+    println!("   repo: {}", ctx.clone_path.display());
     println!();
 }
 
@@ -299,6 +303,7 @@ mod tests {
         Config {
             path: None,
             repos: map,
+            save: Default::default(),
         }
     }
 

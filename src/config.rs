@@ -19,6 +19,25 @@ use crate::paths::Expression;
 pub struct Config {
     pub path: Option<PathBuf>,
     pub repos: BTreeMap<String, RepoConfig>,
+    pub save: SaveConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SaveMode {
+    /// One shared commit message for all dirty repos (via `-m`).
+    #[default]
+    Shared,
+    /// Prompt per dirty repo for a commit message.
+    PerRepo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SaveConfig {
+    /// Mode used when `polydot save` is invoked without `-m` or `-i`.
+    /// Absent in TOML → no default; the user must pass a flag.
+    #[serde(default, rename = "default-mode")]
+    pub default_mode: Option<SaveMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +63,14 @@ impl Config {
         let table: toml::Table = toml::from_str(s)?;
 
         let mut repos = BTreeMap::new();
+        let mut save = SaveConfig::default();
         for (name, value) in table {
+            if name == "save" {
+                save = value
+                    .try_into()
+                    .map_err(|e: toml::de::Error| Error::Config(format!("[save]: {e}")))?;
+                continue;
+            }
             let repo: RepoConfig = value
                 .try_into()
                 .map_err(|e: toml::de::Error| Error::Config(format!("[{name}]: {e}")))?;
@@ -55,6 +81,7 @@ impl Config {
         Ok(Config {
             path: None,
             repos,
+            save,
         })
     }
 
@@ -73,6 +100,13 @@ impl Config {
 
     pub fn to_toml_string(&self) -> Result<String> {
         let mut table = toml::Table::new();
+        if self.save.default_mode.is_some() {
+            table.insert(
+                "save".to_string(),
+                toml::Value::try_from(&self.save)
+                    .map_err(|e| Error::Config(format!("serialize [save]: {e}")))?,
+            );
+        }
         for (name, repo) in &self.repos {
             table.insert(
                 name.clone(),
@@ -84,8 +118,15 @@ impl Config {
     }
 }
 
+// Accepted URL schemes:
+//   https://  — production: GitHub, GitLab, etc., authenticated via PAT.
+//   file://   — local bare repos. No credentials required. Useful for
+//               integration tests and local mirrors / airgapped workflows.
+//
+// SSH (`git@`, `ssh://`) and plain `http://` are rejected with a helpful
+// hint pointing at the supported alternatives.
 fn validate_repo_url(name: &str, url: &str) -> Result<()> {
-    if url.starts_with("https://") {
+    if url.starts_with("https://") || url.starts_with("file://") {
         return Ok(());
     }
     let hint = if url.starts_with("git@") || url.starts_with("ssh://") {
@@ -96,7 +137,7 @@ fn validate_repo_url(name: &str, url: &str) -> Result<()> {
         ""
     };
     Err(Error::Config(format!(
-        "[{name}]: repo url `{url}` must be HTTPS{hint}. \
+        "[{name}]: repo url `{url}` must be HTTPS or file://{hint}. \
          Rewrite as `https://<host>/<owner>/<repo>.git`."
     )))
 }
@@ -215,6 +256,74 @@ clone = "~/r"
 "#;
         let config = Config::from_toml_str(good).unwrap();
         assert_eq!(config.repos.len(), 1);
+    }
+
+    #[test]
+    fn accepts_file_url() {
+        let good = r#"
+[r]
+repo = "file:///tmp/bare.git"
+clone = "~/r"
+"#;
+        let config = Config::from_toml_str(good).unwrap();
+        assert_eq!(config.repos.len(), 1);
+    }
+
+    #[test]
+    fn save_section_is_optional() {
+        let config = Config::from_toml_str(EXAMPLE_CONFIG).unwrap();
+        assert_eq!(config.save.default_mode, None);
+    }
+
+    #[test]
+    fn save_default_mode_shared_parses() {
+        let src = r#"
+[save]
+default-mode = "shared"
+
+[r]
+repo = "https://example.com/r.git"
+clone = "~/r"
+"#;
+        let config = Config::from_toml_str(src).unwrap();
+        assert_eq!(config.save.default_mode, Some(SaveMode::Shared));
+        assert_eq!(config.repos.len(), 1);
+    }
+
+    #[test]
+    fn save_default_mode_per_repo_parses() {
+        let src = r#"
+[save]
+default-mode = "per-repo"
+"#;
+        let config = Config::from_toml_str(src).unwrap();
+        assert_eq!(config.save.default_mode, Some(SaveMode::PerRepo));
+    }
+
+    #[test]
+    fn save_block_with_unknown_mode_fails() {
+        let src = r#"
+[save]
+default-mode = "bogus"
+"#;
+        let err = Config::from_toml_str(src).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn save_default_mode_round_trips() {
+        let src = r#"
+[save]
+default-mode = "per-repo"
+
+[r]
+repo = "https://example.com/r.git"
+clone = "~/r"
+"#;
+        let original = Config::from_toml_str(src).unwrap();
+        let serialized = original.to_toml_string().unwrap();
+        let reparsed = Config::from_toml_str(&serialized).unwrap();
+        assert_eq!(original, reparsed);
     }
 
     #[test]

@@ -54,12 +54,18 @@ enum Command {
     Status,
     /// Commit dirty changes + push, across all managed repos.
     ///
-    /// Pass 1: shared commit message only — pass `-m "<msg>"`. Per-repo
-    /// interactive mode lands in a future phase.
+    /// Mode selection (first match wins):
+    ///   `-m`               → shared mode; one message for all dirty repos.
+    ///   `-i`               → per-repo mode; prompt per dirty repo.
+    ///   neither            → fall back to `[save] default-mode` in config;
+    ///                        error if absent.
     Save {
         /// Shared commit message used for every repo with dirty changes
-        #[arg(long, short)]
-        message: String,
+        #[arg(long, short, conflicts_with = "interactive")]
+        message: Option<String>,
+        /// Prompt per dirty repo for a commit message
+        #[arg(long, short, conflicts_with = "message")]
+        interactive: bool,
     },
     /// Push already-committed work across all repos. No new commits.
     Push,
@@ -99,9 +105,12 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Sync => with_config(config_path, commands::sync::run),
         Command::Link => with_config(config_path, commands::link::run),
         Command::Status => with_config(config_path, commands::status::run),
-        Command::Save { message } => {
-            with_config(config_path, |c| commands::save::run(c, &message))
-        }
+        Command::Save {
+            message,
+            interactive,
+        } => with_config(config_path, |c| {
+            commands::save::run(c, message.as_deref(), interactive)
+        }),
         Command::Push => with_config(config_path, commands::push::run),
     }
 }

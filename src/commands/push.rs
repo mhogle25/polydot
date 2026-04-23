@@ -4,11 +4,16 @@
 //   - Clone path missing → reported as failure (run `polydot sync` first).
 //   - Otherwise attempt `git::push`.
 //     - Pushed → tally and move on.
-//     - Rejected (non-fast-forward) → prompt: [m]anual / [s]kip / [a]bort.
+//     - Rejected (non-fast-forward) → prompt: [r]ebase / [m]anual / [s]kip / [a]bort.
 //
-// "Manual" drops the user into `$SHELL` at the repo. After they exit, we
-// re-attempt the push. Still rejected → re-prompt; succeeded → Resolved.
-// `[a]bort` short-circuits the outer loop and exits 0.
+// On rejection we best-effort fetch so the prompt header can report accurate
+// ahead/behind counts, then:
+//   - [r]ebase replays local commits onto upstream via libgit2. Clean finish
+//     → re-push. Conflict → libgit2 aborts the rebase (pre-rebase state is
+//     restored), and we re-prompt so the user can try [m]anual.
+//   - [m]anual drops the user into `$SHELL` at the repo. After they exit we
+//     re-attempt the push. Still rejected → re-prompt; succeeded → Resolved.
+//   - [a]bort short-circuits the outer loop and exits 0.
 //
 // This command does NOT commit anything — it ships only what's already
 // committed. For commit + push in one shot, use `polydot save`.
@@ -21,7 +26,7 @@ use git2::Repository;
 
 use crate::config::{Config, RepoConfig};
 use crate::credentials::Credentials;
-use crate::git::{self, PushOutcome};
+use crate::git::{self, PushOutcome, RebaseOutcome};
 use crate::paths::{SystemEnv, evaluate};
 use crate::ui::{Menu, MenuOption};
 
@@ -31,6 +36,7 @@ const FALLBACK_SHELL: &str = "/bin/sh";
 struct Summary {
     pushed: usize,
     resolved: usize,
+    up_to_date: usize,
     skipped: usize,
     failed: usize,
 }
@@ -38,8 +44,8 @@ struct Summary {
 impl Summary {
     fn print(&self) {
         println!(
-            "{} pushed, {} resolved, {} skipped, {} failed",
-            self.pushed, self.resolved, self.skipped, self.failed,
+            "{} pushed, {} resolved, {} up-to-date, {} skipped, {} failed",
+            self.pushed, self.resolved, self.up_to_date, self.skipped, self.failed,
         );
     }
 }
@@ -50,16 +56,20 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 }
 
 /// Snapshot passed to the rejection prompter: which repo, where it lives,
-/// and the server's reason for rejecting. Lets the prompter render a useful
-/// header without reaching back into the git layer.
+/// the server's reason for rejecting, and — when a best-effort fetch succeeded
+/// — how many commits local and upstream are apart. Lets the prompter render
+/// a useful header without reaching back into the git layer.
 pub(crate) struct PushPromptCtx<'a> {
     pub name: &'a str,
     pub clone_path: &'a Path,
     pub reason: &'a str,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PushChoice {
+    Rebase,
     Manual,
     Skip,
     Abort,
@@ -69,6 +79,7 @@ pub(crate) enum PushChoice {
 enum RepoOutcome {
     Pushed,
     Resolved,
+    UpToDate,
     Skipped,
     Aborted,
 }
@@ -98,6 +109,7 @@ where
         match result {
             Ok(RepoOutcome::Pushed) => summary.pushed += 1,
             Ok(RepoOutcome::Resolved) => summary.resolved += 1,
+            Ok(RepoOutcome::UpToDate) => summary.up_to_date += 1,
             Ok(RepoOutcome::Skipped) => summary.skipped += 1,
             Ok(RepoOutcome::Aborted) => {
                 summary.skipped += 1;
@@ -134,9 +146,15 @@ where
     }
     let repo =
         git::open(&clone_path).with_context(|| format!("opening {}", clone_path.display()))?;
+    git::ensure_origin_speakable(&repo, &repo_cfg.repo)?;
+    if !has_unpushed_commits(&repo) {
+        println!("up-to-date  {name}");
+        return Ok(RepoOutcome::UpToDate);
+    }
     match git::push(&repo, creds).with_context(|| format!("pushing `{name}`"))? {
         PushOutcome::Pushed => {
-            println!("pushed   {name}");
+            println!("pushed      {name}");
+            println!();
             Ok(RepoOutcome::Pushed)
         }
         PushOutcome::Rejected(reason) => handle_rejected(
@@ -148,6 +166,19 @@ where
             prompter,
             shell_launcher,
         ),
+    }
+}
+
+/// True if local has commits the upstream lacks. If upstream tracking info
+/// is missing (no upstream, or `git::status` errored), err on the side of
+/// attempting the push — a no-op is harmless, a missed push is not.
+fn has_unpushed_commits(repo: &Repository) -> bool {
+    match git::status(repo) {
+        Ok(s) => match s.ahead_behind {
+            Some((ahead, _)) => ahead > 0,
+            None => true,
+        },
+        Err(_) => true,
     }
 }
 
@@ -164,12 +195,18 @@ where
     P: FnMut(&PushPromptCtx<'_>) -> anyhow::Result<PushChoice>,
     S: FnMut(&Path) -> anyhow::Result<()>,
 {
+    // Best-effort fetch so the prompt header has accurate divergence counts.
+    // A fetch failure here is non-fatal — the prompt simply omits the numbers.
+    let _ = git::fetch(repo, creds);
     let mut current_reason = initial_reason.to_string();
     loop {
+        let (ahead, behind) = divergence(repo);
         let ctx = PushPromptCtx {
             name,
             clone_path,
             reason: &current_reason,
+            ahead,
+            behind,
         };
         match prompter(&ctx)? {
             PushChoice::Skip => {
@@ -180,21 +217,106 @@ where
                 println!("  aborting push");
                 return Ok(RepoOutcome::Aborted);
             }
+            PushChoice::Rebase => match run_rebase_then_push(name, repo, creds)? {
+                RebaseStep::Resolved => return Ok(RepoOutcome::Resolved),
+                RebaseStep::StillRejected(reason) => {
+                    current_reason = reason;
+                    let _ = git::fetch(repo, creds);
+                    continue;
+                }
+                RebaseStep::Retry => continue,
+            },
             PushChoice::Manual => {
                 shell_launcher(clone_path)
                     .with_context(|| format!("launching shell at {}", clone_path.display()))?;
                 match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
                     PushOutcome::Pushed => {
                         println!("  resolved  {name} (pushed)");
+                        println!();
                         return Ok(RepoOutcome::Resolved);
                     }
                     PushOutcome::Rejected(reason) => {
                         println!("  push still rejected: {reason}");
                         current_reason = reason;
+                        let _ = git::fetch(repo, creds);
                         continue;
                     }
                 }
             }
+        }
+    }
+}
+
+/// Local-only ahead/behind relative to the configured upstream, or `(None, None)`
+/// if it can't be determined (no upstream, detached HEAD, etc.).
+fn divergence(repo: &Repository) -> (Option<usize>, Option<usize>) {
+    match git::status(repo) {
+        Ok(s) => match s.ahead_behind {
+            Some((a, b)) => (Some(a), Some(b)),
+            None => (None, None),
+        },
+        Err(_) => (None, None),
+    }
+}
+
+/// Outcome of a [r]ebase-then-retry step. Decoupled from `RepoOutcome` so the
+/// caller stays in control of the prompt loop.
+enum RebaseStep {
+    /// Rebase applied cleanly and the follow-up push succeeded.
+    Resolved,
+    /// Rebase applied but push still rejected. Caller re-prompts.
+    StillRejected(String),
+    /// Rebase didn't apply (conflicts aborted it, or nothing to do, or it
+    /// errored out). Repo is in the same shape as before the attempt. Caller
+    /// re-prompts so the user can pick another action.
+    Retry,
+}
+
+fn run_rebase_then_push(
+    name: &str,
+    repo: &Repository,
+    creds: &Credentials,
+) -> anyhow::Result<RebaseStep> {
+    match git::rebase_onto_upstream(repo).with_context(|| format!("rebasing `{name}`")) {
+        Ok(RebaseOutcome::Completed) => {
+            println!("  rebased  {name}");
+            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+                PushOutcome::Pushed => {
+                    println!("  resolved  {name} (rebased + pushed)");
+                    println!();
+                    Ok(RebaseStep::Resolved)
+                }
+                PushOutcome::Rejected(reason) => {
+                    println!("  push still rejected after rebase: {reason}");
+                    Ok(RebaseStep::StillRejected(reason))
+                }
+            }
+        }
+        Ok(RebaseOutcome::NothingToDo) => {
+            // Upstream advanced between rejection and our fetch; a plain
+            // push may succeed now. One-shot retry before falling back.
+            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+                PushOutcome::Pushed => {
+                    println!("  resolved  {name} (pushed)");
+                    println!();
+                    Ok(RebaseStep::Resolved)
+                }
+                PushOutcome::Rejected(reason) => Ok(RebaseStep::StillRejected(reason)),
+            }
+        }
+        Ok(RebaseOutcome::ConflictsAborted(paths)) => {
+            println!("  rebase aborted — conflicts in {} file(s):", paths.len());
+            for p in &paths {
+                println!("    - {p}");
+            }
+            println!("  try [m]anual to resolve by hand");
+            println!();
+            Ok(RebaseStep::Retry)
+        }
+        Err(e) => {
+            eprintln!("  rebase failed: {e:#}");
+            println!();
+            Ok(RebaseStep::Retry)
         }
     }
 }
@@ -205,15 +327,22 @@ fn prompt_via_menu(ctx: &PushPromptCtx<'_>) -> anyhow::Result<PushChoice> {
 }
 
 fn print_rejected_header(ctx: &PushPromptCtx<'_>) {
-    println!();
-    println!("=== {} ===", ctx.name);
-    println!("Push rejected: {}", ctx.reason);
-    println!("  repo: {}", ctx.clone_path.display());
+    println!("rejected    {}", ctx.name);
+    println!("   reason: {}", ctx.reason);
+    println!("   repo: {}", ctx.clone_path.display());
+    if let (Some(a), Some(b)) = (ctx.ahead, ctx.behind) {
+        println!("   local: {a} ahead, {b} behind upstream");
+    }
     println!();
 }
 
 fn build_menu() -> Menu<PushChoice> {
     let options = vec![
+        MenuOption::new(
+            'r',
+            "[r]ebase — replay local commits onto upstream, then re-push",
+            PushChoice::Rebase,
+        ),
         MenuOption::new(
             'm',
             "[m]anual — drop me into a shell at the repo to resolve",
@@ -279,6 +408,7 @@ mod tests {
         Config {
             path: None,
             repos: map,
+            save: Default::default(),
         }
     }
 
@@ -446,6 +576,59 @@ mod tests {
         .unwrap();
     }
 
+    /// White-box: when local matches upstream, `process_repo` reports
+    /// UpToDate and never invokes the network push.
+    #[test]
+    fn process_repo_returns_up_to_date_when_nothing_to_ship() {
+        let (_remote, url, _b_dir, b_path, _b_repo) = fixture_remote_and_clone();
+        let env = SystemEnv;
+        let mut map = BTreeMap::new();
+        map.insert(
+            "r".to_string(),
+            RepoConfig {
+                repo: url.clone(),
+                clone: parse(&b_path.display().to_string()).unwrap(),
+                links: vec![],
+            },
+        );
+        let outcome = process_repo(
+            "r",
+            &map["r"],
+            &Credentials::empty(),
+            &env,
+            &mut scripted_prompter(vec![]),
+            &mut never_called_launcher(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, RepoOutcome::UpToDate), "{outcome:?}");
+    }
+
+    #[test]
+    fn process_repo_pushes_when_local_ahead() {
+        let (_remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
+        commit_file(&b_repo, "ahead.txt", "x", "ahead");
+        let env = SystemEnv;
+        let mut map = BTreeMap::new();
+        map.insert(
+            "r".to_string(),
+            RepoConfig {
+                repo: url.clone(),
+                clone: parse(&b_path.display().to_string()).unwrap(),
+                links: vec![],
+            },
+        );
+        let outcome = process_repo(
+            "r",
+            &map["r"],
+            &Credentials::empty(),
+            &env,
+            &mut scripted_prompter(vec![]),
+            &mut never_called_launcher(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, RepoOutcome::Pushed), "{outcome:?}");
+    }
+
     #[test]
     fn missing_clone_path_is_a_per_repo_failure() {
         // Repo b is missing; repo c is healthy. Run continues.
@@ -577,6 +760,63 @@ mod tests {
         let (_verify_dir, verify_path, _verify_repo) =
             clone_to_tempdir(&format!("file://{}", _remote.path().display()));
         assert!(!verify_path.join("from-b.txt").exists());
+    }
+
+    #[test]
+    fn rebase_choice_replays_and_pushes() {
+        // B rejects on push (non-FF). User picks [r]ebase → libgit2 replays
+        // B's commit onto A's, then re-push succeeds → Resolved.
+        let (remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
+        let (_a_dir, _a_path, a_repo) = clone_to_tempdir(&url);
+        commit_file(&a_repo, "from-a.txt", "a", "from A");
+        push_main(&a_repo);
+        commit_file(&b_repo, "from-b.txt", "b", "from B");
+
+        let config = config_with(vec![("r", url, &b_path)]);
+        run_with(
+            &config,
+            &Credentials::empty(),
+            &mut scripted_prompter(vec![PushChoice::Rebase]),
+            &mut never_called_launcher(),
+        )
+        .unwrap();
+
+        // Remote now has BOTH A's and B's commits.
+        let (_v_dir, v_path, _v_repo) =
+            clone_to_tempdir(&format!("file://{}", remote.path().display()));
+        assert!(v_path.join("from-a.txt").exists());
+        assert!(v_path.join("from-b.txt").exists());
+    }
+
+    #[test]
+    fn rebase_conflict_re_prompts_then_skip_leaves_local_intact() {
+        // A and B both modify README.md. Rebase will conflict → aborted.
+        // User then picks [s]kip; B's local HEAD must still point at its
+        // original commit (abort restored pre-rebase state).
+        let (remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
+        let (_a_dir, _a_path, a_repo) = clone_to_tempdir(&url);
+        commit_file(&a_repo, "README.md", "a-wins\n", "A version");
+        push_main(&a_repo);
+        commit_file(&b_repo, "README.md", "b-wins\n", "B version");
+        let head_before = b_repo.head().unwrap().target().unwrap();
+
+        let config = config_with(vec![("r", url, &b_path)]);
+        run_with(
+            &config,
+            &Credentials::empty(),
+            &mut scripted_prompter(vec![PushChoice::Rebase, PushChoice::Skip]),
+            &mut never_called_launcher(),
+        )
+        .unwrap();
+
+        // B's HEAD is still its pre-rebase commit.
+        let head_after = b_repo.head().unwrap().target().unwrap();
+        assert_eq!(head_after, head_before);
+        // Remote does NOT have B's version.
+        let (_v_dir, v_path, _v_repo) =
+            clone_to_tempdir(&format!("file://{}", remote.path().display()));
+        let readme_on_remote = std::fs::read_to_string(v_path.join("README.md")).unwrap();
+        assert_eq!(readme_on_remote, "a-wins\n");
     }
 
     #[test]

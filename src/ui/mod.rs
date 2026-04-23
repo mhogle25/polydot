@@ -8,6 +8,7 @@
 
 use std::fmt::Write;
 
+pub mod line_editor;
 pub mod menu;
 
 pub use menu::{Menu, MenuOption};

@@ -9,8 +9,8 @@ use std::path::Path;
 
 use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{
-    BranchType, Cred, CredentialType, FetchOptions, IndexAddOption, Oid, PushOptions,
-    RemoteCallbacks, Repository, StatusOptions,
+    BranchType, Cred, CredentialType, DiffFormat, DiffLineType, DiffOptions, DiffStatsFormat,
+    FetchOptions, IndexAddOption, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions,
 };
 
 use crate::credentials::Credentials;
@@ -51,8 +51,52 @@ pub enum PushOutcome {
     Rejected(String),
 }
 
+/// Outcome of a rebase attempt against the configured upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// All local commits were replayed onto upstream successfully.
+    Completed,
+    /// Local has no commits beyond upstream — rebase would be a no-op.
+    NothingToDo,
+    /// A replay step produced merge conflicts. Rebase was aborted and the
+    /// repo restored to its pre-rebase state. The strings name the conflicted
+    /// paths as reported by libgit2's index.
+    ConflictsAborted(Vec<String>),
+}
+
 pub fn open(repo_path: &Path) -> Result<Repository> {
     Repository::open(repo_path).map_err(Error::from)
+}
+
+/// Pre-flight: verify the clone's `origin` URL uses a scheme polydot can
+/// authenticate. Replaces libgit2's cryptic "unsupported credential type"
+/// error with an actionable message pointing at the fix command.
+///
+/// `expected_url` is the URL from `config.toml` — surfaced in the error as
+/// the suggested `git remote set-url` target so the user can copy-paste.
+///
+/// Only schemes are checked. Both URLs being HTTPS but pointing at different
+/// repos is *not* flagged — that's a legitimate user choice (mirror, fork).
+pub fn ensure_origin_speakable(repo: &Repository, expected_url: &str) -> Result<()> {
+    let remote = repo.find_remote("origin")?;
+    let url = remote
+        .url()
+        .ok_or_else(|| Error::Config("origin has no URL configured".to_string()))?;
+    if url.starts_with("https://") || url.starts_with("file://") {
+        return Ok(());
+    }
+    let clone_path = repo
+        .workdir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<repo>".to_string());
+    Err(Error::Config(format!(
+        "origin URL `{url}` uses a scheme polydot can't authenticate \
+         (supported: https://, file://).\n\
+         \n  \
+         config.toml expects: {expected_url}\n\
+         \n  \
+         Fix: git -C {clone_path} remote set-url origin {expected_url}"
+    )))
 }
 
 /// Clone `url` into `dest`. The clone path's parent must exist.
@@ -142,6 +186,77 @@ pub fn try_fast_forward(repo: &Repository) -> Result<FastForward> {
     Ok(FastForward::Advanced)
 }
 
+/// Summary of working-tree changes against HEAD, suitable for the per-repo
+/// save header. `formatted` is `git diff --stat` style output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffSummary {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+    /// Per-file `--stat` block (multi-line). Empty string if `files_changed == 0`.
+    pub formatted: String,
+}
+
+/// Diff options tuned for save's "what would get committed" view: includes
+/// untracked files, excludes ignored, treats new files as all-insertions.
+fn save_diff_options() -> DiffOptions {
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
+    opts
+}
+
+/// Stats of workdir+index vs HEAD — the diff that `commit_all` would stage.
+/// Returns `None` if HEAD is unborn (no commits yet), since there's no tree
+/// to diff against.
+pub fn diff_summary(repo: &Repository) -> Result<Option<DiffSummary>> {
+    let head_tree = match repo.head() {
+        Ok(head) => head.peel_to_tree()?,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut opts = save_diff_options();
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut opts))?;
+    let stats = diff.stats()?;
+    let formatted = if stats.files_changed() == 0 {
+        String::new()
+    } else {
+        stats
+            .to_buf(DiffStatsFormat::FULL, 80)?
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    Ok(Some(DiffSummary {
+        files_changed: stats.files_changed(),
+        insertions: stats.insertions(),
+        deletions: stats.deletions(),
+        formatted,
+    }))
+}
+
+/// Print the workdir+index vs HEAD diff as a unified patch to stdout. Used
+/// by the per-repo save widget's `[v]iew` action. No-op if HEAD is unborn.
+pub fn print_diff(repo: &Repository) -> Result<()> {
+    let head_tree = match repo.head() {
+        Ok(head) => head.peel_to_tree()?,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut opts = save_diff_options();
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut opts))?;
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        match line.origin_value() {
+            DiffLineType::FileHeader | DiffLineType::HunkHeader | DiffLineType::Binary => {}
+            _ => print!("{}", line.origin()),
+        }
+        print!("{}", std::str::from_utf8(line.content()).unwrap_or(""));
+        true
+    })?;
+    Ok(())
+}
+
 /// Stage all changes (new, modified, deleted; respecting `.gitignore`) and
 /// commit with `message`. Returns `Some(oid)` if a commit was created, or
 /// `None` if the working tree was already clean.
@@ -211,6 +326,116 @@ pub fn push(repo: &Repository, creds: &Credentials) -> Result<PushOutcome> {
         Some(reason) => PushOutcome::Rejected(reason),
         None => PushOutcome::Pushed,
     })
+}
+
+/// Rebase the current branch onto its configured upstream, in-tree.
+///
+/// Caller is responsible for running [`fetch`] first if fresh upstream state
+/// matters — this function works purely against what's already in the repo's
+/// refs. On conflict the rebase is aborted and the repo is restored to its
+/// pre-rebase state (HEAD, index, and working tree all rolled back).
+///
+/// Refuses to run with a dirty working tree — libgit2 would overwrite the
+/// user's uncommitted work during checkout.
+pub fn rebase_onto_upstream(repo: &Repository) -> Result<RebaseOutcome> {
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(Error::Config("HEAD is detached".to_string()));
+    }
+    let branch_name = head
+        .shorthand()
+        .ok_or_else(|| Error::Config("HEAD has no shorthand name".to_string()))?
+        .to_string();
+
+    let local_branch = repo.find_branch(&branch_name, BranchType::Local)?;
+    let upstream = match local_branch.upstream() {
+        Ok(u) => u,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
+            return Err(Error::Config(format!(
+                "branch `{branch_name}` has no upstream configured"
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let local_oid = head
+        .target()
+        .ok_or_else(|| Error::Config(format!("branch `{branch_name}` has no target commit")))?;
+    let upstream_oid = upstream
+        .get()
+        .target()
+        .ok_or_else(|| Error::Config("upstream has no target commit".to_string()))?;
+
+    let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
+    if ahead == 0 || behind == 0 {
+        // Nothing to replay (already at / ahead of upstream) or strictly
+        // behind (caller should fast-forward instead). Either way, not our job.
+        return Ok(RebaseOutcome::NothingToDo);
+    }
+
+    if is_dirty(repo)? {
+        return Err(Error::Config(
+            "working tree has uncommitted changes — cannot rebase".to_string(),
+        ));
+    }
+
+    // reference_to_annotated_commit (vs find_annotated_commit) preserves the
+    // ref name. Without it, libgit2's rebase_finish leaves HEAD detached
+    // because it doesn't know which branch to move to the new commit.
+    let local_ref = local_branch.into_reference();
+    let local_annotated = repo.reference_to_annotated_commit(&local_ref)?;
+    let upstream_annotated = repo.find_annotated_commit(upstream_oid)?;
+
+    let mut rebase = repo.rebase(
+        Some(&local_annotated),
+        Some(&upstream_annotated),
+        None,
+        None,
+    )?;
+    let sig = repo.signature()?;
+
+    loop {
+        let step = match rebase.next() {
+            None => break,
+            Some(Ok(op)) => op,
+            Some(Err(e)) => {
+                let _ = rebase.abort();
+                return Err(e.into());
+            }
+        };
+        let _ = step;
+        let conflicted = collect_conflicted_paths(repo)?;
+        if !conflicted.is_empty() {
+            let _ = rebase.abort();
+            return Ok(RebaseOutcome::ConflictsAborted(conflicted));
+        }
+        rebase.commit(None, &sig, None)?;
+    }
+    rebase.finish(Some(&sig))?;
+    Ok(RebaseOutcome::Completed)
+}
+
+/// Paths libgit2 currently flags as conflicted in the repo index. Used only
+/// during rebase to decide whether to abort; empty list = clean apply.
+fn collect_conflicted_paths(repo: &Repository) -> Result<Vec<String>> {
+    let index = repo.index()?;
+    if !index.has_conflicts() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<String> = Vec::new();
+    for entry in index.conflicts()?.flatten() {
+        let raw = entry
+            .our
+            .as_ref()
+            .or(entry.their.as_ref())
+            .or(entry.ancestor.as_ref());
+        if let Some(e) = raw
+            && let Ok(s) = std::str::from_utf8(&e.path)
+        {
+            paths.push(s.to_string());
+        }
+    }
+    Ok(paths)
 }
 
 fn make_remote_callbacks<'a>(creds: &'a Credentials) -> RemoteCallbacks<'a> {
@@ -653,6 +878,103 @@ mod tests {
     }
 
     #[test]
+    fn rebase_replays_local_commits_when_both_sides_advance() {
+        let (remote, _, _) = fixture_repo();
+        let (_b, b_path, _b_drop) = clone_again(&remote);
+        let (_a, _a_path, a_repo) = clone_again(&remote);
+        commit_file(&a_repo, "from-a.txt", "a", "from A");
+        push_main(&a_repo);
+
+        let b_repo = open(&b_path).unwrap();
+        commit_file(&b_repo, "from-b.txt", "b", "from B");
+        fetch(&b_repo, &Credentials::empty()).unwrap();
+
+        let outcome = rebase_onto_upstream(&b_repo).unwrap();
+        assert_eq!(outcome, RebaseOutcome::Completed);
+
+        // Both A's and B's commits are present; HEAD sits on top of A.
+        assert!(b_path.join("from-a.txt").exists(), "A's commit replayed");
+        assert!(b_path.join("from-b.txt").exists(), "B's commit preserved");
+
+        let s = status(&b_repo).unwrap();
+        assert_eq!(
+            s.ahead_behind,
+            Some((1, 0)),
+            "local is one ahead of upstream"
+        );
+        assert!(!s.dirty);
+    }
+
+    #[test]
+    fn rebase_nothing_to_do_when_local_matches_upstream() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        let outcome = rebase_onto_upstream(&repo).unwrap();
+        assert_eq!(outcome, RebaseOutcome::NothingToDo);
+    }
+
+    #[test]
+    fn rebase_nothing_to_do_when_local_strictly_ahead() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        commit_file(&repo, "local-only.txt", "x", "local only");
+        let outcome = rebase_onto_upstream(&repo).unwrap();
+        assert_eq!(outcome, RebaseOutcome::NothingToDo);
+    }
+
+    #[test]
+    fn rebase_aborts_and_restores_repo_on_conflict() {
+        // A and B both edit the same file; B's replay onto A's commit hits a
+        // conflict. Rebase should abort and leave B pointing at its pre-rebase HEAD.
+        let (remote, _, _) = fixture_repo();
+        let (_b, b_path, _b_drop) = clone_again(&remote);
+        let (_a, _a_path, a_repo) = clone_again(&remote);
+        commit_file(&a_repo, "README.md", "a\nwins\n", "A version");
+        push_main(&a_repo);
+
+        let b_repo = open(&b_path).unwrap();
+        commit_file(&b_repo, "README.md", "b\nwins\n", "B version");
+        let head_before = b_repo.head().unwrap().target().unwrap();
+        fetch(&b_repo, &Credentials::empty()).unwrap();
+
+        let outcome = rebase_onto_upstream(&b_repo).unwrap();
+        match outcome {
+            RebaseOutcome::ConflictsAborted(paths) => {
+                assert!(
+                    paths.iter().any(|p| p == "README.md"),
+                    "expected README.md in conflict list, got {paths:?}",
+                );
+            }
+            other => panic!("expected ConflictsAborted, got {other:?}"),
+        }
+
+        // Pre-rebase state restored.
+        let head_after = b_repo.head().unwrap().target().unwrap();
+        assert_eq!(head_after, head_before, "HEAD rolled back after abort");
+        assert!(!status(&b_repo).unwrap().dirty, "tree is clean after abort");
+    }
+
+    #[test]
+    fn rebase_refuses_when_working_tree_is_dirty() {
+        let (remote, _, _) = fixture_repo();
+        let (_b, b_path, _b_drop) = clone_again(&remote);
+        let (_a, _a_path, a_repo) = clone_again(&remote);
+        commit_file(&a_repo, "later.txt", "x", "later");
+        push_main(&a_repo);
+
+        let b_repo = open(&b_path).unwrap();
+        // Local commit so ahead>0, plus a dirty file so the refusal path fires.
+        commit_file(&b_repo, "b-commit.txt", "b", "b commit");
+        fs::write(b_path.join("dirty.txt"), "uncommitted").unwrap();
+        fetch(&b_repo, &Credentials::empty()).unwrap();
+
+        let err = rebase_onto_upstream(&b_repo).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(msg.contains("uncommitted"), "got: {msg}");
+    }
+
+    #[test]
     fn commit_all_stages_untracked_and_creates_commit() {
         let (_remote, _work, path) = fixture_repo();
         let repo = open(&path).unwrap();
@@ -715,6 +1037,106 @@ mod tests {
         assert!(tree.get_name(".gitignore").is_some());
         assert!(tree.get_name("kept.txt").is_some());
         assert!(tree.get_name("ignored.txt").is_none());
+    }
+
+    #[test]
+    fn diff_summary_is_zeroed_for_clean_tree() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        let summary = diff_summary(&repo).unwrap().unwrap();
+        assert_eq!(summary.files_changed, 0);
+        assert_eq!(summary.insertions, 0);
+        assert_eq!(summary.deletions, 0);
+        assert!(summary.formatted.is_empty());
+    }
+
+    #[test]
+    fn diff_summary_counts_modifications_and_untracked() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        // Modify tracked file (one insertion + one deletion vs original).
+        fs::write(path.join("README.md"), "changed\nadded\n").unwrap();
+        // Add an untracked file.
+        fs::write(path.join("new.txt"), "fresh\n").unwrap();
+        let summary = diff_summary(&repo).unwrap().unwrap();
+        assert_eq!(summary.files_changed, 2);
+        assert!(summary.insertions >= 1);
+        assert!(summary.deletions >= 1);
+        assert!(summary.formatted.contains("README.md"));
+        assert!(summary.formatted.contains("new.txt"));
+    }
+
+    #[test]
+    fn diff_summary_respects_gitignore() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        fs::write(path.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(path.join("ignored.txt"), "x").unwrap();
+        let summary = diff_summary(&repo).unwrap().unwrap();
+        // .gitignore appears (untracked) but ignored.txt does not.
+        assert!(summary.formatted.contains(".gitignore"));
+        assert!(!summary.formatted.contains("ignored.txt"));
+    }
+
+    #[test]
+    fn print_diff_runs_without_error_on_dirty_tree() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        fs::write(path.join("README.md"), "changed\n").unwrap();
+        // Just ensure it doesn't error; we don't capture stdout in unit tests.
+        print_diff(&repo).unwrap();
+    }
+
+    #[test]
+    fn ensure_origin_speakable_accepts_file_origin() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        ensure_origin_speakable(&repo, "https://example.com/x.git").unwrap();
+    }
+
+    #[test]
+    fn ensure_origin_speakable_accepts_https_origin() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        repo.remote_set_url("origin", "https://example.com/x.git")
+            .unwrap();
+        ensure_origin_speakable(&repo, "https://example.com/x.git").unwrap();
+    }
+
+    #[test]
+    fn ensure_origin_speakable_rejects_ssh_scp_style() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        repo.remote_set_url("origin", "git@github.com:owner/repo.git")
+            .unwrap();
+        let err = ensure_origin_speakable(&repo, "https://github.com/owner/repo.git").unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(msg.contains("git@github.com:owner/repo.git"));
+        assert!(msg.contains("https://"));
+        assert!(msg.contains("file://"));
+        assert!(msg.contains("config.toml expects: https://github.com/owner/repo.git"));
+        assert!(msg.contains("remote set-url origin https://github.com/owner/repo.git"));
+    }
+
+    #[test]
+    fn ensure_origin_speakable_rejects_ssh_scheme() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        repo.remote_set_url("origin", "ssh://git@github.com/owner/repo.git")
+            .unwrap();
+        let err = ensure_origin_speakable(&repo, "https://github.com/owner/repo.git").unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn ensure_origin_speakable_rejects_plain_http() {
+        let (_remote, _work, path) = fixture_repo();
+        let repo = open(&path).unwrap();
+        repo.remote_set_url("origin", "http://example.com/x.git")
+            .unwrap();
+        let err = ensure_origin_speakable(&repo, "https://example.com/x.git").unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]
