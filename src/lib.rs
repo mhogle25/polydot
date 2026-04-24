@@ -24,7 +24,7 @@ use config::Config;
 #[command(
     name = "polydot",
     version,
-    about = "Git orchestrator for managing N dotfile repos"
+    about = "Sync AI tool configs, per-project memory, and dotfiles across machines"
 )]
 struct Cli {
     /// Enable verbose logging

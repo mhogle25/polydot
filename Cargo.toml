@@ -4,11 +4,11 @@ version = "1.3.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Mitchell Hogle <mitchellhogle@gmail.com>"]
-description = "Git orchestrator for managing N dotfile repos with one command each"
+description = "Sync your AI tool configs and per-project memory across machines (and your dotfiles too)"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/mhogle25/polydot"
 readme = "README.md"
-keywords = ["dotfiles", "git", "symlink", "config"]
+keywords = ["dotfiles", "claude-code", "git", "symlink", "config"]
 categories = ["command-line-utilities"]
 
 [dependencies]

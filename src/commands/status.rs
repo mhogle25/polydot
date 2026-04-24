@@ -337,10 +337,7 @@ mod tests {
                 links: vec![link_at("file", to.to_str().unwrap())],
             },
         );
-        let config = Config {
-            path: None,
-            repos,
-        };
+        let config = Config { path: None, repos };
 
         let env = SystemEnv;
         let reports: Vec<_> = config

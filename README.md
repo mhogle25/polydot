@@ -1,8 +1,41 @@
 # polydot
 
-Git orchestrator for managing N dotfile repos with one command each.
+Sync your AI tool configs and per-project memory across machines (and your dotfiles too).
 
-`polydot` is built for the per-feature-repo dotfile pattern: one git repo per concern (editor config, shell config, claude memory, etc.). Instead of running `git pull`, `git push`, and `ln -sfn` loops by hand across all of them, polydot does each operation against every managed repo in one command.
+`polydot` is a git orchestrator for the configs that follow you across machines: per-project memory in your AI assistants, your editor setup, your shell, anything you want pinned. Each managed thing is its own git repo; one polydot command operates across all of them, and symlinks land them where each tool expects.
+
+## What it's for
+
+### AI tool configs and per-project memory
+
+The strongest use case is keeping AI assistant configs (Claude Code, Cursor, Aider, anything in `~/.config` or `~/.<vendor>/`) and per-project memory consistent across every machine you work on. Path transforms turn a single shared repo into per-project symlinks:
+
+```toml
+[claude-memory]
+repo  = "https://github.com/<you>/claude-memory.git"
+clone = "~/dev/config/claude-memory"
+
+[[claude-memory.links]]
+from = "polydot"
+to   = "~/.claude/projects/${~/dev/projects/polydot | slug}/memory"
+
+[[claude-memory.links]]
+from = "shared"
+to   = "~/.claude/projects/${~ | slug}/memory"
+```
+
+One `claude-memory` repo, fanned out into the per-project memory directories Claude Code expects. Sync, commit, push it across every machine with one command each.
+
+### Traditional dotfiles
+
+polydot is also a clean fit for the per-feature-repo dotfile pattern (one repo for editor config, one for shell, etc.):
+
+```toml
+[nvim-config]
+repo  = "https://github.com/<you>/nvim-config.git"
+clone = "~/dev/config/nvim-config"
+links = [{ from = ".", to = "~/.config/nvim" }]
+```
 
 ## Install
 
@@ -31,13 +64,13 @@ polydot link       # repair any missing/wrong symlinks
 
 ## Authentication
 
-polydot authenticates over HTTPS with a personal access token. SSH URLs (`git@github.com:...`) are not supported — use `https://...` URLs everywhere.
+polydot authenticates over HTTPS with a personal access token. SSH URLs (`git@github.com:...`) are not supported. Use `https://...` URLs everywhere.
 
 For each host, credentials are resolved in this order:
 
-1. **`GITHUB_TOKEN` env var** — GitHub only. Same variable `gh` and most GitHub tooling honor, so one PAT can serve everything.
+1. **`GITHUB_TOKEN` env var** (GitHub only). Same variable `gh` and most GitHub tooling honor, so one PAT can serve everything.
 
-2. **`~/.config/polydot/credentials.toml`** — must be mode `0600`:
+2. **`~/.config/polydot/credentials.toml`** (must be mode `0600`):
 
    ```toml
    [hosts."github.com"]
@@ -45,16 +78,16 @@ For each host, credentials are resolved in this order:
    token    = "<pat>"
    ```
 
-3. **`git credential fill`** — reads whatever credential helper your `git` is configured with (macOS Keychain, libsecret, Windows Credential Manager, `gh`, etc.). **If `git clone <private-repo>` on this machine works without prompting, polydot will too.** Common ways to get here:
-   - `gh auth login` (GitHub CLI — installs its own helper)
+3. **`git credential fill`**. Reads whatever credential helper your `git` is configured with (macOS Keychain, libsecret, Windows Credential Manager, `gh`, etc.). **If `git clone <private-repo>` on this machine works without prompting, polydot will too.** Common ways to get here:
+   - `gh auth login` (GitHub CLI, installs its own helper)
    - `git config --global credential.helper osxkeychain` on macOS, then clone any private repo once to prime the keychain
 
 If none of these yield a token, polydot errors out with a message listing all three options.
 
 ## Documentation
 
-- [Design spec](docs/design.md) — what the tool does
-- [Roadmap](ROADMAP.md) — when and in what order it's built
+- [Design spec](docs/design.md): what the tool does
+- [Roadmap](ROADMAP.md): when and in what order it's built
 
 ## License
 
