@@ -18,7 +18,6 @@ use anyhow::{Context, bail};
 
 use crate::commands::{link as link_cmd, sync};
 use crate::config::{self, Config};
-use crate::credentials::Credentials;
 use crate::git;
 use crate::link;
 
@@ -30,8 +29,7 @@ pub fn run(url: &str, clone_dest: &Path, config_symlink: &Path) -> anyhow::Resul
     let config_source = clone_dest.join(CONFIG_FILENAME);
     refuse_if_already_bootstrapped(&config_source, config_symlink)?;
 
-    let creds = Credentials::load_default().context("loading credentials")?;
-    ensure_config_repo_cloned(url, clone_dest, &creds)?;
+    ensure_config_repo_cloned(url, clone_dest)?;
 
     if !config_source.exists() {
         bail!(
@@ -73,11 +71,7 @@ fn refuse_if_already_bootstrapped(
     Ok(())
 }
 
-fn ensure_config_repo_cloned(
-    url: &str,
-    clone_dest: &Path,
-    creds: &Credentials,
-) -> anyhow::Result<()> {
+fn ensure_config_repo_cloned(url: &str, clone_dest: &Path) -> anyhow::Result<()> {
     if clone_dest.exists() {
         let repo = git::open(clone_dest).with_context(|| {
             format!(
@@ -115,7 +109,7 @@ fn ensure_config_repo_cloned(
         })?;
     }
     println!("cloning  config  →  {}", clone_dest.display());
-    git::clone(url, clone_dest, creds).context("cloning config repo")?;
+    git::clone(url, clone_dest).context("cloning config repo")?;
     Ok(())
 }
 

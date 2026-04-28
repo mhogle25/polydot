@@ -11,7 +11,6 @@ use clap::{Parser, Subcommand};
 
 pub mod commands;
 pub mod config;
-pub mod credentials;
 pub mod error;
 pub mod git;
 pub mod link;

@@ -25,7 +25,6 @@ use anyhow::Context;
 use git2::Repository;
 
 use crate::config::{Config, RepoConfig};
-use crate::credentials::Credentials;
 use crate::git::{self, PushOutcome, RebaseOutcome};
 use crate::paths::{SystemEnv, expand};
 use crate::ui::{Menu, MenuOption};
@@ -51,8 +50,7 @@ impl Summary {
 }
 
 pub fn run(config: &Config) -> anyhow::Result<()> {
-    let creds = Credentials::load_default().context("loading credentials")?;
-    run_with(config, &creds, &mut prompt_via_menu, &mut launch_shell)
+    run_with(config, &mut prompt_via_menu, &mut launch_shell)
 }
 
 /// Snapshot passed to the rejection prompter: which repo, where it lives,
@@ -90,7 +88,6 @@ enum RepoOutcome {
 /// paths are exercised without a TTY or real shell.
 pub(crate) fn run_with<P, S>(
     config: &Config,
-    creds: &Credentials,
     prompter: &mut P,
     shell_launcher: &mut S,
 ) -> anyhow::Result<()>
@@ -105,7 +102,7 @@ where
     let env = SystemEnv;
     let mut summary = Summary::default();
     'outer: for (name, repo_cfg) in &config.repos {
-        let result = process_repo(name, repo_cfg, creds, &env, prompter, shell_launcher);
+        let result = process_repo(name, repo_cfg, &env, prompter, shell_launcher);
         match result {
             Ok(RepoOutcome::Pushed) => summary.pushed += 1,
             Ok(RepoOutcome::Resolved) => summary.resolved += 1,
@@ -128,7 +125,6 @@ where
 fn process_repo<P, S>(
     name: &str,
     repo_cfg: &RepoConfig,
-    creds: &Credentials,
     env: &SystemEnv,
     prompter: &mut P,
     shell_launcher: &mut S,
@@ -151,21 +147,15 @@ where
         println!("up-to-date  {name}");
         return Ok(RepoOutcome::UpToDate);
     }
-    match git::push(&repo, creds).with_context(|| format!("pushing `{name}`"))? {
+    match git::push(&repo).with_context(|| format!("pushing `{name}`"))? {
         PushOutcome::Pushed => {
             println!("pushed      {name}");
             println!();
             Ok(RepoOutcome::Pushed)
         }
-        PushOutcome::Rejected(reason) => handle_rejected(
-            name,
-            &clone_path,
-            &repo,
-            creds,
-            &reason,
-            prompter,
-            shell_launcher,
-        ),
+        PushOutcome::Rejected(reason) => {
+            handle_rejected(name, &clone_path, &repo, &reason, prompter, shell_launcher)
+        }
     }
 }
 
@@ -186,7 +176,6 @@ fn handle_rejected<P, S>(
     name: &str,
     clone_path: &Path,
     repo: &Repository,
-    creds: &Credentials,
     initial_reason: &str,
     prompter: &mut P,
     shell_launcher: &mut S,
@@ -197,7 +186,7 @@ where
 {
     // Best-effort fetch so the prompt header has accurate divergence counts.
     // A fetch failure here is non-fatal — the prompt simply omits the numbers.
-    let _ = git::fetch(repo, creds);
+    let _ = git::fetch(repo);
     let mut current_reason = initial_reason.to_string();
     loop {
         let (ahead, behind) = divergence(repo);
@@ -217,11 +206,11 @@ where
                 println!("  aborting push");
                 return Ok(RepoOutcome::Aborted);
             }
-            PushChoice::Rebase => match run_rebase_then_push(name, repo, creds)? {
+            PushChoice::Rebase => match run_rebase_then_push(name, repo)? {
                 RebaseStep::Resolved => return Ok(RepoOutcome::Resolved),
                 RebaseStep::StillRejected(reason) => {
                     current_reason = reason;
-                    let _ = git::fetch(repo, creds);
+                    let _ = git::fetch(repo);
                     continue;
                 }
                 RebaseStep::Retry => continue,
@@ -229,7 +218,7 @@ where
             PushChoice::Manual => {
                 shell_launcher(clone_path)
                     .with_context(|| format!("launching shell at {}", clone_path.display()))?;
-                match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+                match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                     PushOutcome::Pushed => {
                         println!("  resolved  {name} (pushed)");
                         println!();
@@ -238,7 +227,7 @@ where
                     PushOutcome::Rejected(reason) => {
                         println!("  push still rejected: {reason}");
                         current_reason = reason;
-                        let _ = git::fetch(repo, creds);
+                        let _ = git::fetch(repo);
                         continue;
                     }
                 }
@@ -272,15 +261,11 @@ enum RebaseStep {
     Retry,
 }
 
-fn run_rebase_then_push(
-    name: &str,
-    repo: &Repository,
-    creds: &Credentials,
-) -> anyhow::Result<RebaseStep> {
+fn run_rebase_then_push(name: &str, repo: &Repository) -> anyhow::Result<RebaseStep> {
     match git::rebase_onto_upstream(repo).with_context(|| format!("rebasing `{name}`")) {
         Ok(RebaseOutcome::Completed) => {
             println!("  rebased  {name}");
-            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+            match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                 PushOutcome::Pushed => {
                     println!("  resolved  {name} (rebased + pushed)");
                     println!();
@@ -295,7 +280,7 @@ fn run_rebase_then_push(
         Ok(RebaseOutcome::NothingToDo) => {
             // Upstream advanced between rejection and our fetch; a plain
             // push may succeed now. One-shot retry before falling back.
-            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+            match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                 PushOutcome::Pushed => {
                     println!("  resolved  {name} (pushed)");
                     println!();
@@ -547,7 +532,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -566,7 +550,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -591,7 +574,6 @@ mod tests {
         let outcome = process_repo(
             "r",
             &map["r"],
-            &Credentials::empty(),
             &env,
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
@@ -617,7 +599,6 @@ mod tests {
         let outcome = process_repo(
             "r",
             &map["r"],
-            &Credentials::empty(),
             &env,
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
@@ -643,7 +624,6 @@ mod tests {
         ]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -667,7 +647,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Skip]),
             &mut never_called_launcher(),
         )
@@ -697,7 +676,6 @@ mod tests {
         let config = config_with(vec![("aaa", url1, &b1_path), ("zzz", url2, &b2_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Abort]),
             &mut never_called_launcher(),
         )
@@ -724,7 +702,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Manual]),
             &mut hard_reset_to_upstream_launcher(),
         )
@@ -747,7 +724,6 @@ mod tests {
         // Manual → no-op launcher → still rejected → Skip.
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Manual, PushChoice::Skip]),
             &mut no_op_launcher(),
         )
@@ -772,7 +748,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Rebase]),
             &mut never_called_launcher(),
         )
@@ -800,7 +775,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![PushChoice::Rebase, PushChoice::Skip]),
             &mut never_called_launcher(),
         )
@@ -821,7 +795,6 @@ mod tests {
         let config = config_with(vec![]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )

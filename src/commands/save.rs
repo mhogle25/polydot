@@ -32,7 +32,6 @@ use anyhow::Context;
 use git2::Repository;
 
 use crate::config::{Config, RepoConfig};
-use crate::credentials::Credentials;
 use crate::git::{self, DiffSummary, PushOutcome, RebaseOutcome};
 use crate::paths::{SystemEnv, expand};
 use crate::ui::line_editor::{self, ReadLineOutcome};
@@ -69,11 +68,9 @@ pub(crate) enum Mode {
 
 pub fn run(config: &Config, message: Option<&str>) -> anyhow::Result<()> {
     let mode = resolve_mode(message);
-    let creds = Credentials::load_default().context("loading credentials")?;
     run_with(
         config,
         &mode,
-        &creds,
         &mut prompt_rejected_via_menu,
         &mut prompt_commit_via_menu,
         &mut launch_shell,
@@ -151,7 +148,6 @@ enum RepoOutcome {
 pub(crate) fn run_with<P, C, S>(
     config: &Config,
     mode: &Mode,
-    creds: &Credentials,
     rejection_prompter: &mut P,
     commit_prompter: &mut C,
     shell_launcher: &mut S,
@@ -172,7 +168,6 @@ where
             name,
             repo_cfg,
             mode,
-            creds,
             &env,
             rejection_prompter,
             commit_prompter,
@@ -224,7 +219,6 @@ fn process_repo<P, C, S>(
     name: &str,
     repo_cfg: &RepoConfig,
     mode: &Mode,
-    creds: &Credentials,
     env: &SystemEnv,
     rejection_prompter: &mut P,
     commit_prompter: &mut C,
@@ -248,7 +242,7 @@ where
         return Ok(RepoOutcome::UpToDate);
     }
 
-    match git::push(&repo, creds).with_context(|| format!("pushing `{name}`"))? {
+    match git::push(&repo).with_context(|| format!("pushing `{name}`"))? {
         PushOutcome::Pushed => {
             if committed {
                 println!("committed + pushed  {name}");
@@ -264,7 +258,6 @@ where
             name,
             &clone_path,
             &repo,
-            creds,
             committed,
             &reason,
             rejection_prompter,
@@ -418,7 +411,6 @@ fn handle_rejected<P, S>(
     name: &str,
     clone_path: &Path,
     repo: &Repository,
-    creds: &Credentials,
     committed: bool,
     initial_reason: &str,
     rejection_prompter: &mut P,
@@ -429,7 +421,7 @@ where
     S: FnMut(&Path) -> anyhow::Result<()>,
 {
     // Best-effort fetch so the prompt header can report accurate divergence.
-    let _ = git::fetch(repo, creds);
+    let _ = git::fetch(repo);
     let mut current_reason = initial_reason.to_string();
     loop {
         let (ahead, behind) = divergence(repo);
@@ -450,11 +442,11 @@ where
                 println!("  aborting save");
                 return Ok(RepoOutcome::Aborted { committed });
             }
-            SaveChoice::Rebase => match run_rebase_then_push(name, repo, creds, committed)? {
+            SaveChoice::Rebase => match run_rebase_then_push(name, repo, committed)? {
                 RebaseStep::Resolved => return Ok(RepoOutcome::Resolved { committed }),
                 RebaseStep::StillRejected(reason) => {
                     current_reason = reason;
-                    let _ = git::fetch(repo, creds);
+                    let _ = git::fetch(repo);
                     continue;
                 }
                 RebaseStep::Retry => continue,
@@ -462,7 +454,7 @@ where
             SaveChoice::Manual => {
                 shell_launcher(clone_path)
                     .with_context(|| format!("launching shell at {}", clone_path.display()))?;
-                match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+                match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                     PushOutcome::Pushed => {
                         println!("  resolved  {name} (pushed)");
                         println!();
@@ -471,7 +463,7 @@ where
                     PushOutcome::Rejected(reason) => {
                         println!("  push still rejected: {reason}");
                         current_reason = reason;
-                        let _ = git::fetch(repo, creds);
+                        let _ = git::fetch(repo);
                         continue;
                     }
                 }
@@ -508,13 +500,12 @@ enum RebaseStep {
 fn run_rebase_then_push(
     name: &str,
     repo: &Repository,
-    creds: &Credentials,
     committed: bool,
 ) -> anyhow::Result<RebaseStep> {
     match git::rebase_onto_upstream(repo).with_context(|| format!("rebasing `{name}`")) {
         Ok(RebaseOutcome::Completed) => {
             println!("  rebased  {name}");
-            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+            match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                 PushOutcome::Pushed => {
                     let suffix = if committed {
                         "rebased + pushed, commit preserved"
@@ -532,7 +523,7 @@ fn run_rebase_then_push(
             }
         }
         Ok(RebaseOutcome::NothingToDo) => {
-            match git::push(repo, creds).with_context(|| format!("re-pushing `{name}`"))? {
+            match git::push(repo).with_context(|| format!("re-pushing `{name}`"))? {
                 PushOutcome::Pushed => {
                     println!("  resolved  {name} (pushed)");
                     println!();
@@ -872,7 +863,6 @@ mod tests {
         run_with(
             &config,
             &shared("add notes"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -894,7 +884,6 @@ mod tests {
         run_with(
             &config,
             &shared("should not be used"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -925,7 +914,6 @@ mod tests {
             "r",
             &map["r"],
             &shared("unused"),
-            &Credentials::empty(),
             &env,
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
@@ -955,7 +943,6 @@ mod tests {
             "r",
             &map["r"],
             &shared("unused"),
-            &Credentials::empty(),
             &env,
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
@@ -977,7 +964,6 @@ mod tests {
         run_with(
             &config,
             &shared("unused"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1006,7 +992,6 @@ mod tests {
         run_with(
             &config,
             &shared("add c"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1032,7 +1017,6 @@ mod tests {
         run_with(
             &config,
             &shared("from B"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Skip]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1071,7 +1055,6 @@ mod tests {
         run_with(
             &config,
             &shared("msg"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Abort]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1096,7 +1079,6 @@ mod tests {
         run_with(
             &config,
             &shared("from B"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Manual]),
             &mut never_called_commit_prompter(),
             &mut hard_reset_to_upstream_launcher(),
@@ -1120,7 +1102,6 @@ mod tests {
         run_with(
             &config,
             &shared("from B"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Manual, SaveChoice::Skip]),
             &mut never_called_commit_prompter(),
             &mut no_op_launcher(),
@@ -1148,7 +1129,6 @@ mod tests {
         run_with(
             &config,
             &shared("from B"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Rebase]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1177,7 +1157,6 @@ mod tests {
         run_with(
             &config,
             &shared("B's version"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![SaveChoice::Rebase, SaveChoice::Skip]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1210,7 +1189,6 @@ mod tests {
         run_with(
             &config,
             &shared("msg"),
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),
@@ -1241,7 +1219,6 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut scripted_commit_prompter(vec![CommitChoice::Message(
                 "interactive notes".to_string(),
@@ -1265,7 +1242,6 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut scripted_commit_prompter(vec![CommitChoice::Skip]),
             &mut never_called_launcher(),
@@ -1293,7 +1269,6 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut scripted_commit_prompter(vec![
                 CommitChoice::View,
@@ -1320,7 +1295,6 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut scripted_commit_prompter(vec![CommitChoice::Abort]),
             &mut never_called_launcher(),
@@ -1344,7 +1318,6 @@ mod tests {
         run_with(
             &config,
             &Mode::PerRepo,
-            &Credentials::empty(),
             &mut scripted_rejection_prompter(vec![]),
             &mut never_called_commit_prompter(),
             &mut never_called_launcher(),

@@ -23,7 +23,6 @@ use anyhow::Context;
 use git2::Repository;
 
 use crate::config::{Config, RepoConfig};
-use crate::credentials::Credentials;
 use crate::git::{self, FastForward};
 use crate::paths::{SystemEnv, expand};
 use crate::ui::{Menu, MenuOption};
@@ -55,8 +54,7 @@ impl Summary {
 }
 
 pub fn run(config: &Config) -> anyhow::Result<()> {
-    let creds = Credentials::load_default().context("loading credentials")?;
-    run_with(config, &creds, &mut prompt_via_menu, &mut launch_shell)
+    run_with(config, &mut prompt_via_menu, &mut launch_shell)
 }
 
 /// Snapshot passed to the divergence prompter: which repo, where it lives,
@@ -91,7 +89,6 @@ enum RepoOutcome {
 /// paths are exercised without a TTY or real shell.
 pub(crate) fn run_with<P, S>(
     config: &Config,
-    creds: &Credentials,
     prompter: &mut P,
     shell_launcher: &mut S,
 ) -> anyhow::Result<()>
@@ -106,7 +103,7 @@ where
     let env = SystemEnv;
     let mut summary = Summary::default();
     'outer: for (name, repo_cfg) in &config.repos {
-        let result = process_repo(name, repo_cfg, creds, &env, prompter, shell_launcher);
+        let result = process_repo(name, repo_cfg, &env, prompter, shell_launcher);
         match result {
             Ok(RepoOutcome::Cloned) => summary.cloned += 1,
             Ok(RepoOutcome::Advanced) => summary.advanced += 1,
@@ -130,7 +127,6 @@ where
 fn process_repo<P, S>(
     name: &str,
     repo_cfg: &RepoConfig,
-    creds: &Credentials,
     env: &SystemEnv,
     prompter: &mut P,
     shell_launcher: &mut S,
@@ -146,15 +142,14 @@ where
                 .with_context(|| format!("creating parent dir for `{name}`"))?;
         }
         println!("cloning  {name}  →  {}", clone_path.display());
-        git::clone(&repo_cfg.repo, &clone_path, creds)
-            .with_context(|| format!("cloning `{name}`"))?;
+        git::clone(&repo_cfg.repo, &clone_path).with_context(|| format!("cloning `{name}`"))?;
         println!();
         return Ok(RepoOutcome::Cloned);
     }
     let repo =
         git::open(&clone_path).with_context(|| format!("opening {}", clone_path.display()))?;
     git::ensure_origin_speakable(&repo, &repo_cfg.repo)?;
-    git::fetch(&repo, creds).with_context(|| format!("fetching `{name}`"))?;
+    git::fetch(&repo).with_context(|| format!("fetching `{name}`"))?;
     match git::try_fast_forward(&repo)? {
         FastForward::Advanced => {
             println!("pulled   {name}");
@@ -163,7 +158,7 @@ where
         }
         FastForward::AlreadyUpToDate => Ok(RepoOutcome::UpToDate),
         FastForward::Diverged => {
-            handle_diverged(name, &clone_path, &repo, creds, prompter, shell_launcher)
+            handle_diverged(name, &clone_path, &repo, prompter, shell_launcher)
         }
     }
 }
@@ -172,7 +167,6 @@ fn handle_diverged<P, S>(
     name: &str,
     clone_path: &Path,
     repo: &Repository,
-    creds: &Credentials,
     prompter: &mut P,
     shell_launcher: &mut S,
 ) -> anyhow::Result<RepoOutcome>
@@ -198,7 +192,7 @@ where
             SyncChoice::Manual => {
                 shell_launcher(clone_path)
                     .with_context(|| format!("launching shell at {}", clone_path.display()))?;
-                git::fetch(repo, creds).with_context(|| format!("re-fetching `{name}`"))?;
+                git::fetch(repo).with_context(|| format!("re-fetching `{name}`"))?;
                 match git::try_fast_forward(repo)? {
                     FastForward::Advanced => {
                         println!("  resolved  {name} (fast-forwarded)");
@@ -443,7 +437,6 @@ mod tests {
 
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -464,7 +457,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -482,7 +474,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -502,7 +493,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![SyncChoice::Skip]),
             &mut never_called_launcher(),
         )
@@ -533,7 +523,6 @@ mod tests {
         let config = config_with(vec![("aaa", url1, &b1_path), ("zzz", url2, &b2_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![SyncChoice::Abort]),
             &mut never_called_launcher(),
         )
@@ -557,7 +546,6 @@ mod tests {
         let config = config_with(vec![("r", url, &b_path)]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![SyncChoice::Manual]),
             &mut hard_reset_to_upstream_launcher(),
         )
@@ -580,7 +568,6 @@ mod tests {
         // First Manual → no-op launcher → still diverged → re-prompt → Skip.
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![SyncChoice::Manual, SyncChoice::Skip]),
             &mut no_op_launcher(),
         )
@@ -613,7 +600,6 @@ mod tests {
         ]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )
@@ -628,7 +614,6 @@ mod tests {
         let config = config_with(vec![]);
         run_with(
             &config,
-            &Credentials::empty(),
             &mut scripted_prompter(vec![]),
             &mut never_called_launcher(),
         )

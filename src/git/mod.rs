@@ -1,19 +1,20 @@
-// Git operations layer (wraps git2).
+// Git operations layer.
 //
-// Phase 2 added read-only ops (open, status, ahead/behind).
-// Phase 4 adds network ops over HTTPS only (clone, fetch, fast-forward, push).
-// Authentication is HTTPS basic-auth with PAT — see `crate::credentials`.
+// Local reads (open, status, ahead/behind, diff, commit, rebase) wrap git2.
+// Network ops (clone, fetch, push) shell out to the user's `git` binary so
+// auth — SSH keys, credential helpers, GPG signing — is inherited from the
+// user's git config rather than reimplemented here.
 
-use std::cell::RefCell;
+use std::io::IsTerminal;
 use std::path::Path;
+use std::process::Command;
 
-use git2::build::{CheckoutBuilder, RepoBuilder};
+use git2::build::CheckoutBuilder;
 use git2::{
-    BranchType, Cred, CredentialType, DiffFormat, DiffLineType, DiffOptions, DiffStatsFormat,
-    FetchOptions, IndexAddOption, Oid, PushOptions, RemoteCallbacks, Repository, StatusOptions,
+    BranchType, DiffFormat, DiffLineType, DiffOptions, DiffStatsFormat, IndexAddOption, Oid,
+    Repository, StatusOptions,
 };
 
-use crate::credentials::Credentials;
 use crate::error::{Error, Result};
 
 /// Snapshot of a repo's local-only git state. Network is never touched.
@@ -99,27 +100,61 @@ pub fn ensure_origin_speakable(repo: &Repository, expected_url: &str) -> Result<
     )))
 }
 
+/// Build a `git` Command with non-interactive env: no HTTPS credential
+/// prompt, and (when stdin isn't a TTY) no SSH passphrase prompt either.
+/// Hooks/cron contexts get a fast failure instead of a hung process.
+fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    if !std::io::stdin().is_terminal() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    cmd
+}
+
+/// Translate a `Command` invocation result into a Result<()>, attaching
+/// the captured stderr on failure so the user sees git's own error message.
+fn run_git(cmd: &mut Command, action: &str) -> Result<()> {
+    let output = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::Config("`git` command not found — install git to use polydot".to_string())
+        } else {
+            Error::Config(format!("invoking git for {action}: {e}"))
+        }
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Config(format!(
+            "git {action} failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Clone `url` into `dest`. The clone path's parent must exist.
-pub fn clone(url: &str, dest: &Path, creds: &Credentials) -> Result<Repository> {
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(make_remote_callbacks(creds));
-    let mut builder = RepoBuilder::new();
-    builder.fetch_options(fo);
-    builder.clone(url, dest).map_err(Error::from)
+pub fn clone(url: &str, dest: &Path) -> Result<Repository> {
+    run_git(
+        git_command().arg("clone").arg(url).arg(dest),
+        &format!("clone {url}"),
+    )?;
+    open(dest)
 }
 
 /// Fetch from `origin`, no merge.
-pub fn fetch(repo: &Repository, creds: &Credentials) -> Result<()> {
-    let mut remote = repo.find_remote("origin")?;
-    let refspecs: Vec<String> = remote
-        .fetch_refspecs()?
-        .iter()
-        .filter_map(|s| s.map(String::from))
-        .collect();
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(make_remote_callbacks(creds));
-    remote.fetch(&refspecs, Some(&mut fo), None)?;
-    Ok(())
+pub fn fetch(repo: &Repository) -> Result<()> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| Error::Config("repository has no working directory".to_string()))?;
+    run_git(
+        git_command()
+            .arg("-C")
+            .arg(workdir)
+            .arg("fetch")
+            .arg("origin"),
+        "fetch",
+    )
 }
 
 /// Try to fast-forward the current branch to its upstream. Local-only — call
@@ -290,7 +325,7 @@ pub fn commit_all(repo: &Repository, message: &str) -> Result<Option<Oid>> {
 }
 
 /// Push the current branch to `origin`, same name on both sides.
-pub fn push(repo: &Repository, creds: &Credentials) -> Result<PushOutcome> {
+pub fn push(repo: &Repository) -> Result<PushOutcome> {
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::Config("HEAD is detached".to_string()));
@@ -299,33 +334,53 @@ pub fn push(repo: &Repository, creds: &Credentials) -> Result<PushOutcome> {
         .shorthand()
         .ok_or_else(|| Error::Config("HEAD has no shorthand name".to_string()))?
         .to_string();
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| Error::Config("repository has no working directory".to_string()))?;
 
-    let rejection: RefCell<Option<String>> = RefCell::new(None);
-    {
-        let mut remote = repo.find_remote("origin")?;
-        let mut callbacks = make_remote_callbacks(creds);
-        callbacks.push_update_reference(|refname, status| {
-            if let Some(reason) = status {
-                *rejection.borrow_mut() = Some(format!("{refname}: {reason}"));
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+    let output = git_command()
+        .arg("-C")
+        .arg(workdir)
+        .args(["push", "--porcelain", "origin"])
+        .arg(&refspec)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::Config("`git` command not found — install git to use polydot".to_string())
+            } else {
+                Error::Config(format!("invoking git for push: {e}"))
             }
-            Ok(())
-        });
-        let mut po = PushOptions::new();
-        po.remote_callbacks(callbacks);
-        let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
-        match remote.push(&[&refspec], Some(&mut po)) {
-            Ok(()) => {}
-            Err(e) if e.code() == git2::ErrorCode::NotFastForward => {
-                return Ok(PushOutcome::Rejected(e.message().to_string()));
-            }
-            Err(e) => return Err(e.into()),
-        }
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // `git push --porcelain` emits one line per ref; `!` flag = rejected.
+    // Format: <flag>\t<from>:<to>\t<summary> (<reason>)
+    if let Some(reason) = parse_push_rejection(&stdout) {
+        return Ok(PushOutcome::Rejected(reason));
     }
 
-    Ok(match rejection.into_inner() {
-        Some(reason) => PushOutcome::Rejected(reason),
-        None => PushOutcome::Pushed,
-    })
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Config(format!(
+            "git push failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        )));
+    }
+
+    Ok(PushOutcome::Pushed)
+}
+
+/// Scan `git push --porcelain` output for a rejected ref. Returns the
+/// per-ref reason if any line is `!`-flagged.
+fn parse_push_rejection(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix('!') {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
 }
 
 /// Rebase the current branch onto its configured upstream, in-tree.
@@ -436,36 +491,6 @@ fn collect_conflicted_paths(repo: &Repository) -> Result<Vec<String>> {
         }
     }
     Ok(paths)
-}
-
-fn make_remote_callbacks<'a>(creds: &'a Credentials) -> RemoteCallbacks<'a> {
-    let mut cb = RemoteCallbacks::new();
-    cb.credentials(move |url, _username_from_url, allowed_types| {
-        let host = extract_host(url).ok_or_else(|| {
-            git2::Error::from_str(&format!("could not extract host from URL: {url}"))
-        })?;
-        let host_creds = creds.for_host(host).ok_or_else(|| {
-            git2::Error::from_str(&format!("no credentials configured for host `{host}`"))
-        })?;
-        if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
-            Cred::userpass_plaintext(&host_creds.username, &host_creds.token)
-        } else {
-            Err(git2::Error::from_str(&format!(
-                "unsupported credential type {allowed_types:?} for host `{host}`"
-            )))
-        }
-    });
-    cb
-}
-
-fn extract_host(url: &str) -> Option<&str> {
-    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let after_user = after_scheme
-        .rsplit_once('@')
-        .map_or(after_scheme, |(_, rest)| rest);
-    let host_with_maybe_port = after_user.split('/').next()?;
-    let host = host_with_maybe_port.split(':').next()?;
-    if host.is_empty() { None } else { Some(host) }
 }
 
 pub fn status(repo: &Repository) -> Result<GitStatus> {
@@ -698,49 +723,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_host_basic_https() {
-        assert_eq!(
-            extract_host("https://github.com/foo/bar.git"),
-            Some("github.com")
-        );
-    }
-
-    #[test]
-    fn extract_host_strips_userinfo() {
-        assert_eq!(
-            extract_host("https://user:token@github.com/foo/bar.git"),
-            Some("github.com")
-        );
-    }
-
-    #[test]
-    fn extract_host_strips_port() {
-        assert_eq!(
-            extract_host("https://localhost:8080/foo.git"),
-            Some("localhost")
-        );
-    }
-
-    #[test]
-    fn extract_host_handles_no_path() {
-        assert_eq!(extract_host("https://example.com"), Some("example.com"));
-    }
-
-    #[test]
-    fn extract_host_returns_none_for_empty_or_malformed() {
-        assert_eq!(extract_host(""), None);
-        assert_eq!(extract_host("https://"), None);
-        assert_eq!(extract_host("https:///path"), None);
-    }
-
-    #[test]
     fn clone_creates_repo_at_destination() {
         let (remote, _orig, _orig_path) = fixture_repo();
         let dest_dir = TempDir::new().unwrap();
         let dest = dest_dir.path().join("cloned");
         let url = format!("file://{}", remote.path().display());
 
-        let cloned = clone(&url, &dest, &Credentials::empty()).unwrap();
+        let cloned = clone(&url, &dest).unwrap();
         assert!(cloned.workdir().unwrap().exists());
         assert!(cloned.head().unwrap().target().is_some());
     }
@@ -781,7 +770,7 @@ mod tests {
             .unwrap();
         assert_eq!(local_before_fetch, upstream_before);
 
-        fetch(&b2_repo, &Credentials::empty()).unwrap();
+        fetch(&b2_repo).unwrap();
 
         let upstream_after = b2_repo
             .find_branch("origin/main", BranchType::Remote)
@@ -809,7 +798,7 @@ mod tests {
         push_main(&a_repo);
 
         let b_repo = open(&b_path).unwrap();
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
         let outcome = try_fast_forward(&b_repo).unwrap();
         assert_eq!(outcome, FastForward::Advanced);
 
@@ -851,7 +840,7 @@ mod tests {
 
         let b_repo = open(&b_path).unwrap();
         commit_file(&b_repo, "from-b.txt", "b", "from B");
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
 
         let outcome = try_fast_forward(&b_repo).unwrap();
         assert_eq!(outcome, FastForward::Diverged);
@@ -868,7 +857,7 @@ mod tests {
         fs::write(b_path.join("dirty.txt"), "uncommitted").unwrap();
 
         let b_repo = open(&b_path).unwrap();
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
         let outcome = try_fast_forward(&b_repo).unwrap();
         assert_eq!(outcome, FastForward::Diverged);
     }
@@ -878,7 +867,7 @@ mod tests {
         let (remote, _, _) = fixture_repo();
         let (_a, _a_path, a_repo) = clone_again(&remote);
         commit_file(&a_repo, "hello.txt", "hi", "from A");
-        let outcome = push(&a_repo, &Credentials::empty()).unwrap();
+        let outcome = push(&a_repo).unwrap();
         assert_eq!(outcome, PushOutcome::Pushed);
     }
 
@@ -891,7 +880,7 @@ mod tests {
         push_main(&a_repo);
 
         commit_file(&b_repo, "from-b.txt", "b", "from B");
-        let outcome = push(&b_repo, &Credentials::empty()).unwrap();
+        let outcome = push(&b_repo).unwrap();
         assert!(
             matches!(outcome, PushOutcome::Rejected(_)),
             "got {outcome:?}"
@@ -908,7 +897,7 @@ mod tests {
 
         let b_repo = open(&b_path).unwrap();
         commit_file(&b_repo, "from-b.txt", "b", "from B");
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
 
         let outcome = rebase_onto_upstream(&b_repo).unwrap();
         assert_eq!(outcome, RebaseOutcome::Completed);
@@ -956,7 +945,7 @@ mod tests {
         let b_repo = open(&b_path).unwrap();
         commit_file(&b_repo, "README.md", "b\nwins\n", "B version");
         let head_before = b_repo.head().unwrap().target().unwrap();
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
 
         let outcome = rebase_onto_upstream(&b_repo).unwrap();
         match outcome {
@@ -987,7 +976,7 @@ mod tests {
         // Local commit so ahead>0, plus a dirty file so the refusal path fires.
         commit_file(&b_repo, "b-commit.txt", "b", "b commit");
         fs::write(b_path.join("dirty.txt"), "uncommitted").unwrap();
-        fetch(&b_repo, &Credentials::empty()).unwrap();
+        fetch(&b_repo).unwrap();
 
         let err = rebase_onto_upstream(&b_repo).unwrap_err();
         let msg = err.to_string();
