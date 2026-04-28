@@ -18,6 +18,7 @@ console = "0.15"
 dirs = "5"
 git2 = "0.19"
 libc = "0.2"
+reedline = "0.47"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 toml = "0.8"

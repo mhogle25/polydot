@@ -55,7 +55,6 @@ pub struct Menu<T> {
     options: Vec<MenuOption<T>>,
     default_index: usize,
     cancel_index: Option<usize>,
-    footer_hint: String,
 }
 
 impl<T> Menu<T> {
@@ -71,7 +70,6 @@ impl<T> Menu<T> {
             options,
             default_index: 0,
             cancel_index: None,
-            footer_hint: FOOTER_HINT.to_string(),
         }
     }
 
@@ -121,20 +119,14 @@ impl<T> Menu<T> {
         }
         let initial = self.default_index;
         let cancel = self.cancel_index;
-        let footer = self.footer_hint.clone();
         let mut renderer = TermRenderer::new(term);
         let mut reader = TermKeyReader {
             term: renderer.term.clone(),
         };
         renderer.term.hide_cursor()?;
-        let outcome = run(
-            initial,
-            cancel,
-            &self.options,
-            &footer,
-            &mut reader,
-            |state| renderer.render(state, &self.options, &footer),
-        );
+        let outcome = run(initial, cancel, &self.options, &mut reader, |state| {
+            renderer.render(state, &self.options)
+        });
         let _ = renderer.term.show_cursor();
         let _ = renderer.clear();
         let chosen_index = outcome?;
@@ -201,7 +193,6 @@ fn run<T, R, F>(
     initial: usize,
     cancel_index: Option<usize>,
     options: &[MenuOption<T>],
-    _footer: &str,
     reader: &mut R,
     mut render: F,
 ) -> Result<usize>
@@ -240,12 +231,7 @@ impl TermRenderer {
         }
     }
 
-    fn render<T>(
-        &mut self,
-        current: usize,
-        options: &[MenuOption<T>],
-        footer: &str,
-    ) -> io::Result<()> {
+    fn render<T>(&mut self, current: usize, options: &[MenuOption<T>]) -> io::Result<()> {
         if self.lines_drawn > 0 {
             self.term.clear_last_lines(self.lines_drawn)?;
         }
@@ -260,7 +246,7 @@ impl TermRenderer {
             buf.push_str(&opt.label);
             buf.push('\n');
         }
-        buf.push_str(footer);
+        buf.push_str(FOOTER_HINT);
         buf.push('\n');
         self.term.write_all(buf.as_bytes())?;
         self.lines_drawn = options.len() + 1;
@@ -372,7 +358,7 @@ mod tests {
         let mut reader = Scripted {
             keys: keys.into_iter(),
         };
-        run(initial, cancel, &opts, FOOTER_HINT, &mut reader, |_| Ok(())).unwrap()
+        run(initial, cancel, &opts, &mut reader, |_| Ok(())).unwrap()
     }
 
     #[test]
