@@ -268,11 +268,10 @@ Companion to [`docs/design.md`](docs/design.md). The design doc is *what* the to
 
 (Mirrors design doc, repeated here for roadmap completeness — items that might tempt mid-phase scope creep.)
 
-- **`polydot add <from> <to>` — next in queue.** Create a symlink from an existing file/dir in a managed repo to an arbitrary destination AND append the matching `[[repo.links]]` entry to config.toml. Polydot's first config write — needs `toml_edit` (or equivalent) to preserve comments/formatting on round-trip. Repo is inferred by matching `<from>` against each repo's `clone` path. Reuses `link`'s conflict-resolution prompter for an occupied `to`.
-- `polydot adopt --register` — config rewriting variant of the existing `[a]dopt` action: move a file into a repo AND add the link entry.
+- **CLI mutation verbs — next in queue.** `polydot link add/rm/list` and `polydot repo add/rm` for editing config from the shell instead of by hand. Polydot's first config write — needs `toml_edit` (or equivalent) to preserve comments/formatting on round-trip. Reuses `link`'s conflict-resolution prompter for an occupied `to`.
+- Lightweight events system: `post-save` / `post-link` / `post-sync` shell hooks. Observer-only, no veto. Single bash script per event with env-var dispatch context.
 - Parallel git operations
 - `polydot doctor` — health check
 - Per-repo branch policies
-- Plugin system (external `polydot-<transform>` binaries on PATH)
 
 When a phase encounters a "we could also do X" thought, X gets filed here, not implemented.

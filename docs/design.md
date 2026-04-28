@@ -30,60 +30,36 @@ Decided. Rationale: mature CLI ecosystem (`clap`, `serde` + `toml`, `git2`, `dir
 # ~/.config/polydot/config.toml
 
 # Each [<name>] is a managed repo
-[claude-memory]
-repo  = "https://github.com/mhogle25/claude-memory.git"
-clone = "~/dev/config/claude-memory"
-
-[[claude-memory.links]]
-from = "lish"
-to   = "~/.claude/projects/${~/dev/projects/lish-zig | slug}/memory"
-
-[[claude-memory.links]]
-from = "folio"
-to   = "~/.claude/projects/${~/dev/projects/folio-zig | slug}/memory"
-
-[[claude-memory.links]]
-from = "darkmass"
-to   = "~/.claude/projects/${~/dev/projects/darkmass-zig | slug}/memory"
-
-[[claude-memory.links]]
-from = "shared"
-to   = "~/.claude/projects/${~ | slug}/memory"
-
 [nvim-config]
-repo  = "https://github.com/mhogle25/nvim-config.git"
+repo  = "https://github.com/<you>/nvim-config.git"
 clone = "~/dev/config/nvim-config"
 links = [{ from = ".", to = "~/.config/nvim" }]
 
-[claude-config]
-repo  = "https://github.com/mhogle25/claude-config.git"
-clone = "~/dev/config/claude-config"
-links = [{ from = "CLAUDE.md", to = "~/.claude/CLAUDE.md" }]
+[shell-config]
+repo  = "git@github.com:<you>/shell-config.git"
+clone = "~/dev/config/shell-config"
+links = [
+  { from = "zshrc",  to = "~/.zshrc" },
+  { from = "bashrc", to = "~/.bashrc" },
+]
 
 [polydot-config]
-repo  = "https://github.com/mhogle25/polydot-config.git"
+repo  = "https://github.com/<you>/polydot-config.git"
 clone = "~/dev/config/polydot-config"
 links = [{ from = "config.toml", to = "~/.config/polydot/config.toml" }]
 ```
 
 `polydot-config` is self-listed — once bootstrapped, polydot manages its own config repo like any other.
 
-## Path expression syntax
+## Path expansion
 
-- **`$VAR`** in plain text: env var expansion
-- **`~`** in path-like contexts: home expansion (always-on)
-- **`${expr | transform [| transform...]}`**: apply transforms to expr
-- **Escape literal `$`** with `$$` (shell convention)
+`clone` and link `to` are plain strings with shell-style expansion applied at command-run time:
 
-### Built-in transforms (v1)
+- **`~`** at the start expands to the user's home dir.
+- **`$NAME`** expands to env var `NAME`.
+- **`$$`** is a literal `$` (shell convention).
 
-| Transform | Purpose |
-|---|---|
-| `slug` | abs path → dash-slug (`/home/x/y` → `-home-x-y`) |
-| `basename` | last path segment |
-| `dirname` | parent path |
-
-Multi-arg transforms and plugins deferred until first real use case.
+No other syntax is interpreted; everything else passes through verbatim.
 
 ## Commands
 
@@ -163,10 +139,10 @@ choice>
 ### Save in per-repo mode
 
 ```
-=== claude-memory (3 files changed) ===
- lish/architecture.md  |  15 +++
- folio/MEMORY.md       |   2 +
- darkmass/entity.md    |   7 +++---
+=== nvim-config (3 files changed) ===
+ init.lua              |  15 +++
+ lua/plugins/init.lua  |   2 +
+ lua/util.lua          |   7 +++---
 
 [v]iew full diff | [s]kip | commit message>
 ```
@@ -191,22 +167,14 @@ One manual step (install binary), one automated bootstrap command, fully synced 
 
 ## Hard scope line
 
-Will not support, ever in v1:
+Out of scope for v1:
 - Templating (variable substitution in file contents)
 - Secrets (encrypted values)
-- Pre/post-link hooks (arbitrary scripts)
 - Non-git-backed targets (plain directories)
-
-Config is read-only for the tool — user hand-edits `config.toml`. No `polydot add` or auto-register-on-adopt.
-
-## Plugin system
-
-Deferred. Trigger to revisit: a real use case where the four built-in transforms (`slug`, `basename`, `dirname`, plus `$VAR`/`~` expansion) cannot express what's needed. When that happens, design will be **external binaries on PATH** following the `git`/`gh` subcommand pattern (e.g., polydot sees unknown transform `xyz`, invokes `polydot-xyz` with structured args).
 
 ## Out of scope for v1, possible later
 
 - Parallel git operations (currently serial)
-- `polydot add <repo> <target>` interactive registration
-- `polydot adopt --register` updates config when adopting files
 - `polydot doctor` health-check command
 - Per-repo branch policies (currently assumes single-branch workflow)
+- Lightweight events system (post-save / post-link / post-sync hooks for user shell scripts)
