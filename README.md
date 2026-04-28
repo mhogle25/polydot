@@ -68,25 +68,11 @@ polydot link       # repair any missing/wrong symlinks
 
 ## Authentication
 
-polydot authenticates over HTTPS with a personal access token. SSH URLs (`git@github.com:...`) are not supported. Use `https://...` URLs everywhere.
+polydot inherits authentication from your `git` configuration. Whatever URL you can `git clone` from your shell will work in polydot — HTTPS with credential helpers (macOS Keychain, libsecret, `gh`, etc.), SSH keys, or any other transport git supports.
 
-For each host, credentials are resolved in this order:
+For non-interactive contexts (cron, CI, automation hooks), load your SSH key into ssh-agent before running polydot. When stdin isn't a TTY polydot sets `ssh -o BatchMode=yes`, so missing-passphrase prompts fail fast instead of hanging.
 
-1. **`GITHUB_TOKEN` env var** (GitHub only). Same variable `gh` and most GitHub tooling honor, so one PAT can serve everything.
-
-2. **`~/.config/polydot/credentials.toml`** (must be mode `0600`):
-
-   ```toml
-   [hosts."github.com"]
-   username = "<your-github-username>"
-   token    = "<pat>"
-   ```
-
-3. **`git credential fill`**. Reads whatever credential helper your `git` is configured with (macOS Keychain, libsecret, Windows Credential Manager, `gh`, etc.). **If `git clone <private-repo>` on this machine works without prompting, polydot will too.** Common ways to get here:
-   - `gh auth login` (GitHub CLI, installs its own helper)
-   - `git config --global credential.helper osxkeychain` on macOS, then clone any private repo once to prime the keychain
-
-If none of these yield a token, polydot errors out with a message listing all three options.
+Plain `http://` URLs are rejected — credentials would travel in cleartext. Use `https://` instead.
 
 ## Documentation
 

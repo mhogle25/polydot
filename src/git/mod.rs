@@ -69,21 +69,22 @@ pub fn open(repo_path: &Path) -> Result<Repository> {
     Repository::open(repo_path).map_err(Error::from)
 }
 
-/// Pre-flight: verify the clone's `origin` URL uses a scheme polydot can
-/// authenticate. Replaces libgit2's cryptic "unsupported credential type"
-/// error with an actionable message pointing at the fix command.
+/// Pre-flight: verify the clone's `origin` URL uses a scheme git supports
+/// over the wire. Catches plain `http://` (cleartext credentials) and other
+/// nonsense URLs early with an actionable error pointing at the fix command.
 ///
 /// `expected_url` is the URL from `config.toml` — surfaced in the error as
 /// the suggested `git remote set-url` target so the user can copy-paste.
-///
-/// Only schemes are checked. Both URLs being HTTPS but pointing at different
-/// repos is *not* flagged — that's a legitimate user choice (mirror, fork).
 pub fn ensure_origin_speakable(repo: &Repository, expected_url: &str) -> Result<()> {
     let remote = repo.find_remote("origin")?;
     let url = remote
         .url()
         .ok_or_else(|| Error::Config("origin has no URL configured".to_string()))?;
-    if url.starts_with("https://") || url.starts_with("file://") {
+    if url.starts_with("https://")
+        || url.starts_with("ssh://")
+        || url.starts_with("file://")
+        || url.starts_with("git@")
+    {
         return Ok(());
     }
     let clone_path = repo
@@ -91,8 +92,8 @@ pub fn ensure_origin_speakable(repo: &Repository, expected_url: &str) -> Result<
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<repo>".to_string());
     Err(Error::Config(format!(
-        "origin URL `{url}` uses a scheme polydot can't authenticate \
-         (supported: https://, file://).\n\
+        "origin URL `{url}` uses a scheme polydot won't speak \
+         (supported: https://, ssh://, git@..., file://).\n\
          \n  \
          config.toml expects: {expected_url}\n\
          \n  \
@@ -1114,29 +1115,21 @@ mod tests {
     }
 
     #[test]
-    fn ensure_origin_speakable_rejects_ssh_scp_style() {
+    fn ensure_origin_speakable_accepts_ssh_scp_style() {
         let (_remote, _work, path) = fixture_repo();
         let repo = open(&path).unwrap();
         repo.remote_set_url("origin", "git@github.com:owner/repo.git")
             .unwrap();
-        let err = ensure_origin_speakable(&repo, "https://github.com/owner/repo.git").unwrap_err();
-        let msg = err.to_string();
-        assert!(matches!(err, Error::Config(_)));
-        assert!(msg.contains("git@github.com:owner/repo.git"));
-        assert!(msg.contains("https://"));
-        assert!(msg.contains("file://"));
-        assert!(msg.contains("config.toml expects: https://github.com/owner/repo.git"));
-        assert!(msg.contains("remote set-url origin https://github.com/owner/repo.git"));
+        ensure_origin_speakable(&repo, "git@github.com:owner/repo.git").unwrap();
     }
 
     #[test]
-    fn ensure_origin_speakable_rejects_ssh_scheme() {
+    fn ensure_origin_speakable_accepts_ssh_scheme() {
         let (_remote, _work, path) = fixture_repo();
         let repo = open(&path).unwrap();
         repo.remote_set_url("origin", "ssh://git@github.com/owner/repo.git")
             .unwrap();
-        let err = ensure_origin_speakable(&repo, "https://github.com/owner/repo.git").unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
+        ensure_origin_speakable(&repo, "ssh://git@github.com/owner/repo.git").unwrap();
     }
 
     #[test]

@@ -187,27 +187,29 @@ fn is_inside(child: &Path, parent: &Path) -> bool {
     child != parent && child.starts_with(parent)
 }
 
-// Accepted URL schemes:
-//   https://  — production: GitHub, GitLab, etc., authenticated via PAT.
-//   file://   — local bare repos. No credentials required. Useful for
-//               integration tests and local mirrors / airgapped workflows.
+// Accepted URL schemes — anything the user's `git` binary can clone:
+//   https://     — credential helpers / GITHUB_TOKEN / etc. inherited from git
+//   ssh://       — SSH keys + agent inherited from git
+//   git@host:... — scp-style SSH, same as above
+//   file://      — local bare repos (tests, mirrors, airgapped workflows)
 //
-// SSH (`git@`, `ssh://`) and plain `http://` are rejected with a helpful
-// hint pointing at the supported alternatives.
+// Plain `http://` is rejected as a footgun — git CLI accepts it but credentials
+// would travel in cleartext.
 pub(crate) fn validate_repo_url(name: &str, url: &str) -> Result<()> {
-    if url.starts_with("https://") || url.starts_with("file://") {
+    if url.starts_with("https://")
+        || url.starts_with("ssh://")
+        || url.starts_with("file://")
+        || url.starts_with("git@")
+    {
         return Ok(());
     }
-    let hint = if url.starts_with("git@") || url.starts_with("ssh://") {
-        " — polydot authenticates with HTTPS + PAT, not SSH"
-    } else if url.starts_with("http://") {
-        " — plain HTTP is rejected, use HTTPS"
+    let hint = if url.starts_with("http://") {
+        " — plain HTTP is rejected (use HTTPS)"
     } else {
         ""
     };
     Err(Error::Config(format!(
-        "[{name}]: repo url `{url}` must be HTTPS or file://{hint}. \
-         Rewrite as `https://<host>/<owner>/<repo>.git`."
+        "[{name}]: repo url `{url}` must be HTTPS, SSH, or file://{hint}."
     )))
 }
 
@@ -278,28 +280,25 @@ links = [{ from = "config.toml", to = "~/.config/example/config.toml" }]
     }
 
     #[test]
-    fn rejects_ssh_scp_style_url() {
-        let bad = r#"
+    fn accepts_ssh_scp_style_url() {
+        let good = r#"
 [notes]
 repo = "git@example.com:alice/notes.git"
 clone = "~/dev/config/notes"
 "#;
-        let err = Config::from_toml_str(bad).unwrap_err();
-        let msg = err.to_string();
-        assert!(matches!(err, Error::Config(_)));
-        assert!(msg.contains("HTTPS"));
-        assert!(msg.contains("PAT") || msg.contains("SSH"));
+        let config = Config::from_toml_str(good).unwrap();
+        assert_eq!(config.repos.len(), 1);
     }
 
     #[test]
-    fn rejects_ssh_scheme_url() {
-        let bad = r#"
+    fn accepts_ssh_scheme_url() {
+        let good = r#"
 [r]
 repo = "ssh://git@example.com/alice/r.git"
 clone = "~/r"
 "#;
-        let err = Config::from_toml_str(bad).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
+        let config = Config::from_toml_str(good).unwrap();
+        assert_eq!(config.repos.len(), 1);
     }
 
     #[test]

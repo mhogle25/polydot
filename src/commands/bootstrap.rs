@@ -298,22 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ssh_url() {
-        let workdir = TempDir::new().unwrap();
-        let clone_dest = workdir.path().join("clone");
-        let config_symlink = workdir.path().join("config.toml");
-
-        let err = run(
-            "git@github.com:owner/repo.git",
-            &clone_dest,
-            &config_symlink,
-        )
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("HTTPS"), "unexpected error: {msg}");
-    }
-
-    #[test]
     fn invokes_sync_and_link_after_bootstrap() {
         // Config with one managed repo; bootstrap should clone it via sync
         // and then (trivially) run link — no symlinks configured, so link

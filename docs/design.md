@@ -91,7 +91,8 @@ Multi-arg transforms and plugins deferred until first real use case.
 polydot bootstrap <config-repo-url> [--to <path>]
     Clone the config repo, symlink config.toml into place, then sync + link
     everything else. The "new machine" entry point.
-    URL must be `https://` (authenticated via PAT) or `file://`.
+    URL accepts any scheme git can clone (https, ssh, file). Auth is
+    inherited from the user's git config.
     --to defaults to $XDG_DATA_HOME/polydot/config.
 
 polydot sync
