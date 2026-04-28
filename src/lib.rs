@@ -40,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a fresh local config. No remote repo needed — useful for trying polydot.
+    Init,
     /// Clone the config repo, symlink config.toml into place, then sync + link everything else
     Bootstrap {
         /// HTTPS or file:// URL of the config repo
@@ -105,6 +107,13 @@ fn init_tracing(verbose: bool) {
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     let config_path = cli.config;
     match cli.command {
+        Command::Init => {
+            let path = match config_path {
+                Some(p) => p,
+                None => default_config_path()?,
+            };
+            commands::init::run(&path)
+        }
         Command::Bootstrap { url, to } => {
             let clone_dest = match to {
                 Some(p) => p,
