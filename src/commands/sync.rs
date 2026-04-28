@@ -25,7 +25,7 @@ use git2::Repository;
 use crate::config::{Config, RepoConfig};
 use crate::credentials::Credentials;
 use crate::git::{self, FastForward};
-use crate::paths::{SystemEnv, evaluate};
+use crate::paths::{SystemEnv, expand};
 use crate::ui::{Menu, MenuOption};
 
 const FALLBACK_SHELL: &str = "/bin/sh";
@@ -272,7 +272,7 @@ fn resolve_clone_path(
     repo_cfg: &RepoConfig,
     env: &SystemEnv,
 ) -> anyhow::Result<PathBuf> {
-    let s = evaluate(&repo_cfg.clone, env)
+    let s = expand(&repo_cfg.clone, env)
         .with_context(|| format!("evaluating clone path for `{name}`"))?;
     Ok(PathBuf::from(s))
 }
@@ -281,7 +281,6 @@ fn resolve_clone_path(
 mod tests {
     use super::*;
     use crate::config::RepoConfig;
-    use crate::paths::parse;
     use git2::{BranchType, Repository};
     use std::collections::{BTreeMap, VecDeque};
     use std::fs;
@@ -290,12 +289,11 @@ mod tests {
     fn config_with(repos: Vec<(&str, String, &Path)>) -> Config {
         let mut map = BTreeMap::new();
         for (name, url, clone_path) in repos {
-            let clone_expr = parse(&clone_path.display().to_string()).unwrap();
             map.insert(
                 name.to_string(),
                 RepoConfig {
                     repo: url,
-                    clone: clone_expr,
+                    clone: clone_path.to_string_lossy().into_owned(),
                     links: vec![],
                 },
             );

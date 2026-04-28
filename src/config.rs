@@ -3,9 +3,8 @@
 // Top-level shape:
 //   [<repo-name>]              — one table per managed repo
 //
-// Path expressions in `clone` and link `to` fields are parsed at load time,
-// so syntactic errors in the config surface immediately rather than at
-// command-run time.
+// `clone` and link `to` are plain strings with shell-style `~` and `$VAR`
+// expansion applied at command-run time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::paths::{Env, Expression, SystemEnv, evaluate};
+use crate::paths::{Env, SystemEnv, expand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -25,18 +24,18 @@ pub struct Config {
 pub struct RepoConfig {
     /// Remote URL to clone from.
     pub repo: String,
-    /// Local checkout path (path expression).
-    pub clone: Expression,
+    /// Local checkout path. Supports `~` and `$VAR` expansion.
+    pub clone: String,
     #[serde(default)]
     pub links: Vec<Link>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
-    /// Path within the repo (relative). Plain string — no expression syntax.
+    /// Path within the repo (relative).
     pub from: String,
-    /// Symlink target (path expression).
-    pub to: Expression,
+    /// Symlink target. Supports `~` and `$VAR` expansion.
+    pub to: String,
 }
 
 impl Config {
@@ -78,7 +77,7 @@ impl Config {
     pub fn validate_topology(&self, env: &impl Env) -> Result<()> {
         let mut clones: Vec<(String, PathBuf)> = Vec::new();
         for (name, repo) in &self.repos {
-            let s = evaluate(&repo.clone, env)
+            let s = expand(&repo.clone, env)
                 .map_err(|e| Error::Config(format!("[{name}] clone: {e}")))?;
             clones.push((name.clone(), PathBuf::from(s)));
         }
@@ -107,7 +106,7 @@ impl Config {
         let mut links: Vec<(String, String, PathBuf)> = Vec::new();
         for (name, repo) in &self.repos {
             for link in &repo.links {
-                let s = evaluate(&link.to, env)
+                let s = expand(&link.to, env)
                     .map_err(|e| Error::Config(format!("[{name}] link `{}` to: {e}", link.from)))?;
                 links.push((name.clone(), link.from.clone(), PathBuf::from(s)));
             }
@@ -245,11 +244,11 @@ clone = "~/dev/config/notes"
 
 [[notes.links]]
 from = "shared"
-to   = "~/.notes/${~ | slug}/index"
+to   = "~/.notes/shared/index"
 
 [[notes.links]]
 from = "primary"
-to   = "~/.notes/${~/dev/projects/example-app | slug}/index"
+to   = "~/.notes/primary/index"
 
 [settings]
 repo  = "https://example.com/alice/settings.git"
@@ -276,29 +275,6 @@ links = [{ from = "config.toml", to = "~/.config/example/config.toml" }]
     fn empty_config_is_valid() {
         let config = Config::from_toml_str("").unwrap();
         assert!(config.repos.is_empty());
-    }
-
-    #[test]
-    fn invalid_path_expression_fails_at_load() {
-        let bad = r#"
-[broken]
-repo = "https://example.com/x.git"
-clone = "~/foo/${unterminated"
-"#;
-        let err = Config::from_toml_str(bad).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn unknown_transform_fails_at_load() {
-        let bad = r#"
-[broken]
-repo = "https://example.com/x.git"
-clone = "~/foo"
-links = [{ from = ".", to = "${~ | bogus}" }]
-"#;
-        let err = Config::from_toml_str(bad).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]

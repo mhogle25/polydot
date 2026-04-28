@@ -11,7 +11,7 @@ use anyhow::Context;
 use crate::config::{Config, Link, RepoConfig};
 use crate::git::{self, GitStatus};
 use crate::link::{self, LinkState};
-use crate::paths::{SystemEnv, evaluate};
+use crate::paths::{SystemEnv, expand};
 use crate::ui;
 
 #[derive(Debug)]
@@ -63,7 +63,7 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
 }
 
 fn gather(name: &str, repo_cfg: &RepoConfig, env: &SystemEnv) -> anyhow::Result<RepoReport> {
-    let clone_path_str = evaluate(&repo_cfg.clone, env)
+    let clone_path_str = expand(&repo_cfg.clone, env)
         .with_context(|| format!("evaluating clone path for `{name}`"))?;
     let clone_path = PathBuf::from(&clone_path_str);
 
@@ -96,7 +96,7 @@ fn gather_git(clone_path: &std::path::Path) -> RepoGitState {
 }
 
 fn gather_link(clone_path: &std::path::Path, link: &Link, env: &SystemEnv) -> LinkReport {
-    let to_str = match evaluate(&link.to, env) {
+    let to_str = match expand(&link.to, env) {
         Ok(s) => s,
         Err(e) => {
             return LinkReport {
@@ -209,7 +209,6 @@ fn format_link_detail(link: &LinkReport, index: usize) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::{Link, RepoConfig};
-    use crate::paths::parse;
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs as unix_fs;
@@ -218,7 +217,7 @@ mod tests {
     fn link_at(from: &str, to: &str) -> Link {
         Link {
             from: from.to_string(),
-            to: parse(to).unwrap(),
+            to: to.to_string(),
         }
     }
 
@@ -333,7 +332,7 @@ mod tests {
             "demo".to_string(),
             RepoConfig {
                 repo: "https://example.com/demo.git".to_string(),
-                clone: parse(clone_path.to_str().unwrap()).unwrap(),
+                clone: clone_path.to_string_lossy().into_owned(),
                 links: vec![link_at("file", to.to_str().unwrap())],
             },
         );

@@ -21,7 +21,7 @@ use anyhow::Context;
 
 use crate::config::{Config, Link, RepoConfig};
 use crate::link::{self, Action, ApplyOutcome, LinkState};
-use crate::paths::{SystemEnv, evaluate};
+use crate::paths::{SystemEnv, expand};
 use crate::ui::{Menu, MenuOption};
 
 #[derive(Debug, Default)]
@@ -111,7 +111,7 @@ fn resolve_clone_path(
     repo_cfg: &RepoConfig,
     env: &SystemEnv,
 ) -> anyhow::Result<PathBuf> {
-    let s = evaluate(&repo_cfg.clone, env)
+    let s = expand(&repo_cfg.clone, env)
         .with_context(|| format!("evaluating clone path for `{name}`"))?;
     Ok(PathBuf::from(s))
 }
@@ -127,7 +127,7 @@ where
     F: FnMut(&PromptCtx<'_>) -> anyhow::Result<Choice>,
 {
     let to = PathBuf::from(
-        evaluate(&link_cfg.to, env)
+        expand(&link_cfg.to, env)
             .with_context(|| format!("evaluating link target for `{repo_name}`"))?,
     );
     let expected_source = clone_path.join(&link_cfg.from);
