@@ -74,7 +74,7 @@ pub fn expand(input: &str, env: &impl Env) -> Result<String> {
             let ch = input[i..]
                 .chars()
                 .next()
-                .ok_or_else(|| Error::Path("invalid utf-8 in path expression".into()))?;
+                .ok_or_else(|| Error::Path("invalid utf-8 in path string".into()))?;
             out.push(ch);
             i += ch.len_utf8();
         }

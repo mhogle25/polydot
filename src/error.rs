@@ -13,7 +13,7 @@ pub enum Error {
     #[error("config: {0}")]
     Config(String),
 
-    #[error("path expression: {0}")]
+    #[error("path: {0}")]
     Path(String),
 
     #[error("git: {0}")]

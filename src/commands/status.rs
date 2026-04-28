@@ -39,9 +39,7 @@ struct LinkReport {
 #[derive(Debug)]
 enum LinkResult {
     Resolved(LinkState),
-    /// `to` couldn't be evaluated (path expression error after load — should
-    /// be unreachable given Phase 1's load-time validation, but we degrade
-    /// gracefully anyway).
+    /// `to` couldn't be expanded (e.g., refers to an unset env var).
     UnresolvableTarget(String),
     /// `fs::symlink_metadata` failed for a reason other than NotFound.
     InspectionError(String),

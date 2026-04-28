@@ -799,7 +799,6 @@ dependencies = [
  "console",
  "dirs",
  "git2",
- "libc",
  "reedline",
  "serde",
  "tempfile",
