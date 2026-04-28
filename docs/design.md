@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A git orchestrator for keeping AI tool configs, per-project memory, and dotfiles in sync across machines, via the per-concern repo pattern (one git repo per concern). polydot does clone, symlink, save (commit + push) across all managed repos with one command each.
+A git orchestrator for keeping dotfiles in sync across machines, via the per-concern repo pattern (one git repo per concern). polydot does clone, symlink, save (commit + push) across all managed repos with one command each.
 
 ## Repo + binary layout
 

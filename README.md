@@ -1,41 +1,45 @@
 # polydot
 
-Sync your AI tool configs and per-project memory across machines (and your dotfiles too).
+A dotfile manager for the per-feature-repo pattern: one git repo per concern (editor, shell, work tools, anything you want pinned). polydot orchestrates them — sync, symlink, commit, push — across all of them with one command each.
 
-`polydot` is a git orchestrator for the configs that follow you across machines: per-project memory in your AI assistants, your editor setup, your shell, anything you want pinned. Each managed thing is its own git repo; one polydot command operates across all of them, and symlinks land them where each tool expects.
+## Why multi-repo?
 
-## What it's for
+Most dotfile managers assume one big repo with everything. polydot is for the opposite case: when each concern is its own git repo because they have different lifecycles, sharing rules, or upstream relationships. Examples:
 
-### AI tool configs and per-project memory
+- `nvim-config` you maintain yourself, public on GitHub
+- `work-config` private to your work account
+- A colorscheme repo you fork from upstream and rebase occasionally
+- `polydot-config` itself, version-controlled like everything else (polydot manages its own config)
 
-The strongest use case is keeping AI assistant configs (Claude Code, Cursor, Aider, anything in `~/.config` or `~/.<vendor>/`) and per-project memory consistent across every machine you work on. Path transforms turn a single shared repo into per-project symlinks:
-
-```toml
-[claude-memory]
-repo  = "https://github.com/<you>/claude-memory.git"
-clone = "~/dev/config/claude-memory"
-
-[[claude-memory.links]]
-from = "polydot"
-to   = "~/.claude/projects/${~/dev/projects/polydot | slug}/memory"
-
-[[claude-memory.links]]
-from = "shared"
-to   = "~/.claude/projects/${~ | slug}/memory"
-```
-
-One `claude-memory` repo, fanned out into the per-project memory directories Claude Code expects. Sync, commit, push it across every machine with one command each.
-
-### Traditional dotfiles
-
-polydot is also a clean fit for the per-feature-repo dotfile pattern (one repo for editor config, one for shell, etc.):
+One config file lists every managed repo. One `polydot save` commits and pushes across all dirty ones. One `polydot link` repairs symlinks for everything.
 
 ```toml
+# ~/.config/polydot/config.toml
+
 [nvim-config]
 repo  = "https://github.com/<you>/nvim-config.git"
 clone = "~/dev/config/nvim-config"
 links = [{ from = ".", to = "~/.config/nvim" }]
+
+[shell-config]
+repo  = "https://github.com/<you>/shell-config.git"
+clone = "~/dev/config/shell-config"
+links = [
+  { from = "zshrc",  to = "~/.zshrc" },
+  { from = "bashrc", to = "~/.bashrc" },
+]
+
+# polydot manages its own config repo too
+[polydot-config]
+repo  = "https://github.com/<you>/polydot-config.git"
+clone = "~/dev/config/polydot-config"
+links = [{ from = "config.toml", to = "~/.config/polydot/config.toml" }]
 ```
+
+## When to use something else
+
+- **Claude Code memory sync.** If your goal is "Claude memory follows me across machines," use [claude-brain](https://github.com/toroleapinc/claude-brain). It's purpose-built — auto-sync hooks at session start/end, semantic merge for memory conflicts, secret stripping. polydot doesn't and won't compete on those features.
+- **Single-repo dotfiles.** If you have one big dotfile repo with everything in it, [chezmoi](https://github.com/twpayne/chezmoi), [yadm](https://yadm.io/), or [stow](https://www.gnu.org/software/stow/) probably fit better. polydot's reason for being is the multi-repo orchestration; if you don't need that, it's overkill.
 
 ## Install
 
