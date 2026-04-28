@@ -337,10 +337,10 @@ clone = "~/r"
     }
 
     #[test]
-    fn save_section_no_longer_reserved() {
-        // `[save]` used to be a special top-level section. After 1.3.0 it's
-        // treated like any other repo table — so it'll fail validation
-        // because it's missing the required `repo` + `clone` fields.
+    fn top_level_table_without_repo_and_clone_fails() {
+        // Top-level tables are managed-repo entries; they require both
+        // `repo` and `clone`. A bare table missing them fails validation
+        // regardless of name — including names that look config-like.
         let src = r#"
 [save]
 default-mode = "per-repo"
