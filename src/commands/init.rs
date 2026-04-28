@@ -11,11 +11,11 @@ use anyhow::{Context, bail};
 const STUB_CONFIG: &str = r#"# polydot config
 #
 # Each top-level table is a managed git repo:
-#   repo  = remote URL (https://... or file://... — SSH inherited via git CLI)
+#   repo  = remote URL (https/ssh/file — auth inherited from your git config)
 #   clone = where it lives on disk (supports ~ and $VAR expansion)
 #   links = list of { from = path-in-repo, to = symlink-target }
 #
-# Example — uncomment and edit, or use `polydot repo add` once implemented:
+# Add entries via `polydot repo add` and `polydot link add`, or hand-edit:
 #
 # [nvim-config]
 # repo  = "https://github.com/<you>/nvim-config.git"

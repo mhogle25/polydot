@@ -21,6 +21,7 @@ reedline = "0.47"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 toml = "0.8"
+toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

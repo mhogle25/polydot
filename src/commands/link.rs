@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::config::{Config, Link, RepoConfig};
+use crate::config_edit::{self, AddOutcome};
 use crate::link::{self, Action, ApplyOutcome, LinkState};
 use crate::paths::{SystemEnv, expand};
 use crate::ui::{Menu, MenuOption};
@@ -104,6 +105,92 @@ enum StepOutcome {
     Resolved,
     Skipped,
     Quit,
+}
+
+/// `polydot link add` — append a link to a repo's config entry. With
+/// `--adopt`, also moves the file currently at `to` into the repo and
+/// creates the symlink in one shot.
+pub fn add(
+    config_path: &Path,
+    repo: &str,
+    from: &str,
+    to: &str,
+    adopt: bool,
+) -> anyhow::Result<()> {
+    match config_edit::add_link(config_path, repo, from, to)? {
+        AddOutcome::Added => println!("added link [{repo}] {from} → {to}"),
+        AddOutcome::AlreadyExists => {
+            println!("[{repo}] link `{from}` already configured (no change)")
+        }
+    }
+
+    if adopt {
+        adopt_after_add(config_path, repo, from, to)?;
+    }
+    Ok(())
+}
+
+/// `polydot link rm` — drop a link entry from config. The on-disk
+/// symlink (if any) is left alone; run `polydot link` afterward to
+/// reconcile.
+pub fn rm(config_path: &Path, repo: &str, from: &str) -> anyhow::Result<()> {
+    config_edit::remove_link(config_path, repo, from)?;
+    println!("removed link [{repo}] {from}");
+    Ok(())
+}
+
+/// `polydot link list` — dump the configured links. With a repo
+/// filter, restricts to that repo.
+pub fn list(config: &Config, repo: Option<&str>) -> anyhow::Result<()> {
+    let mut printed_any = false;
+    for (name, repo_cfg) in &config.repos {
+        if let Some(filter) = repo
+            && filter != name
+        {
+            continue;
+        }
+        if repo_cfg.links.is_empty() {
+            continue;
+        }
+        println!("[{name}]");
+        for link in &repo_cfg.links {
+            println!("  {} → {}", link.from, link.to);
+        }
+        printed_any = true;
+    }
+    if !printed_any {
+        match repo {
+            Some(r) => println!("(no links configured for [{r}])"),
+            None => println!("(no links configured)"),
+        }
+    }
+    Ok(())
+}
+
+/// Move `to` into the repo at `from`, then create the symlink. Used
+/// only in the `link add --adopt` flow. The config entry is already
+/// written by the time we get here, so a failure leaves a configured
+/// link without an on-disk symlink — the user can re-run `polydot
+/// link` to finish.
+fn adopt_after_add(config_path: &Path, repo: &str, from: &str, to: &str) -> anyhow::Result<()> {
+    let config = Config::load(config_path)
+        .with_context(|| format!("re-loading config from {}", config_path.display()))?;
+    let env = SystemEnv;
+    let repo_cfg = config.require_repo(repo)?;
+    let clone_path = resolve_clone_path(repo, repo_cfg, &env)?;
+    let expected_source = clone_path.join(from);
+    let to_path = PathBuf::from(expand(to, &env)?);
+
+    let outcome = link::apply(&expected_source, &to_path, Action::Adopt)?;
+    match outcome {
+        ApplyOutcome::Adopted => println!(
+            "adopted {} → {}",
+            to_path.display(),
+            expected_source.display()
+        ),
+        other => println!("adopt outcome: {other:?}"),
+    }
+    Ok(())
 }
 
 fn resolve_clone_path(

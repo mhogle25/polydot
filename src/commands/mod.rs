@@ -3,6 +3,7 @@ pub mod commit;
 pub mod init;
 pub mod link;
 pub mod push;
+pub mod repo;
 pub mod save;
 pub mod status;
 pub mod sync;
