@@ -268,7 +268,6 @@ Companion to [`docs/design.md`](docs/design.md). The design doc is *what* the to
 
 (Mirrors design doc, repeated here for roadmap completeness — items that might tempt mid-phase scope creep.)
 
-- **CLI mutation verbs — next in queue.** `polydot link add/rm/list` and `polydot repo add/rm` for editing config from the shell instead of by hand. Polydot's first config write — needs `toml_edit` (or equivalent) to preserve comments/formatting on round-trip. Reuses `link`'s conflict-resolution prompter for an occupied `to`.
 - Lightweight events system: `post-save` / `post-link` / `post-sync` shell hooks. Observer-only, no veto. Single bash script per event with env-var dispatch context.
 - Parallel git operations
 - `polydot doctor` — health check

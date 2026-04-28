@@ -63,14 +63,24 @@ No other syntax is interpreted; everything else passes through verbatim.
 
 ## Commands
 
+### Setup
+
 ```
+polydot init
+    Create a fresh empty config at the configured path. Refuses to
+    clobber an existing file. No remote repo needed.
+
 polydot bootstrap <config-repo-url> [--to <path>]
     Clone the config repo, symlink config.toml into place, then sync + link
     everything else. The "new machine" entry point.
     URL accepts any scheme git can clone (https, ssh, file). Auth is
     inherited from the user's git config.
     --to defaults to $XDG_DATA_HOME/polydot/config.
+```
 
+### Day-to-day
+
+```
 polydot sync
     Clone missing repos. Pull existing repos. On conflict during pull:
     interactive prompt per affected repo.
@@ -88,9 +98,44 @@ polydot save [-m "<message>"]
     No flag: per-repo interactive prompt for each dirty repo.
     -m "<msg>": shared mode — one commit message across all dirty repos.
 
+polydot commit [-m "<message>"]
+    Commit dirty changes across all repos, without pushing. Same mode
+    semantics as save.
+
 polydot push
     Push already-committed work across all repos. No new commits.
 ```
+
+### Config editing
+
+```
+polydot repo add <name> --repo <url> --clone <path>
+    Append a managed-repo entry. Idempotent on exact match; errors on
+    a conflicting name. Does not clone — run `polydot sync` after.
+
+polydot repo rm <name>
+    Remove a repo entry (and all its links). Files on disk are untouched.
+
+polydot repo list
+    Print configured repos.
+
+polydot link add <repo> <from> <to> [--adopt]
+    Append a link entry to a managed repo. Idempotent on exact match;
+    errors if `from` exists with a different `to`. With --adopt, also
+    moves the file currently at `to` into the repo at `from` and creates
+    the symlink immediately.
+
+polydot link rm <repo> <from>
+    Remove a link entry. The on-disk symlink is left alone — run
+    `polydot link` afterward to reconcile.
+
+polydot link list [<repo>]
+    Print configured links, optionally filtered to one repo.
+```
+
+All `repo`/`link` mutations are format-preserving: comments and existing
+whitespace round-trip through the edit, so a hand-curated config stays
+readable after CLI edits.
 
 ## Interactive prompts
 

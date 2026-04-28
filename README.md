@@ -51,8 +51,22 @@ cargo install --git https://github.com/mhogle25/polydot
 
 ## Quick start
 
+For a fresh machine that already has a `polydot-config` git repo:
+
 ```sh
 polydot bootstrap https://github.com/<you>/<your-polydot-config>.git
+```
+
+To try polydot locally without a remote config repo first:
+
+```sh
+polydot init                              # create a fresh ~/.config/polydot/config.toml
+polydot repo add nvim \                   # add a managed repo
+  --repo https://github.com/<you>/nvim-config.git \
+  --clone ~/dev/config/nvim-config
+polydot link add nvim . ~/.config/nvim    # add a link entry
+polydot sync                              # clone the repo
+polydot link                              # create the symlink
 ```
 
 Day-to-day:
@@ -65,6 +79,20 @@ polydot commit     # commit all dirty, don't push (offline / review-before-push)
 polydot push       # distribute already-committed work across all repos
 polydot link       # repair any missing/wrong symlinks
 ```
+
+Editing config from the shell:
+
+```sh
+polydot repo add <name> --repo <url> --clone <path>
+polydot repo rm  <name>
+polydot repo list
+
+polydot link add <repo> <from> <to> [--adopt]
+polydot link rm  <repo> <from>
+polydot link list [<repo>]
+```
+
+`link add --adopt` moves the file currently at `<to>` into the repo at `<from>` and creates the symlink in one step — useful when you want to start managing a file that already exists on disk.
 
 ## Authentication
 
