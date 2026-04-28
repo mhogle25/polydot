@@ -23,7 +23,7 @@ use config::Config;
 #[command(
     name = "polydot",
     version,
-    about = "Sync AI tool configs, per-project memory, and dotfiles across machines"
+    about = "Multi-repo dotfile orchestrator: sync, symlink, and version-control a fleet of separate config repos with one CLI."
 )]
 struct Cli {
     /// Enable verbose logging
