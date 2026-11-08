@@ -139,6 +139,8 @@ enum RepoOutcome {
     AbortedClean,
     /// Push rejected, user resolved via [m]anual then re-push succeeded.
     Resolved { committed: bool },
+    /// New commit created, then pushing it errored. Commit stays local.
+    CommittedThenFailed(anyhow::Error),
 }
 
 /// Test seam: same as [`run`], but the rejection prompter, commit prompter,
@@ -204,6 +206,11 @@ where
                 summary.skipped += 1;
                 break 'outer;
             }
+            Ok(RepoOutcome::CommittedThenFailed(error)) => {
+                eprintln!("error saving `{name}`: {error:#}");
+                summary.committed += 1;
+                summary.failed += 1;
+            }
             Err(e) => {
                 eprintln!("error saving `{name}`: {e:#}");
                 summary.failed += 1;
@@ -242,7 +249,32 @@ where
         return Ok(RepoOutcome::UpToDate);
     }
 
-    match git::push(&repo).with_context(|| format!("pushing `{name}`"))? {
+    match push_phase(
+        name,
+        &clone_path,
+        &repo,
+        committed,
+        rejection_prompter,
+        shell_launcher,
+    ) {
+        Err(error) if committed => Ok(RepoOutcome::CommittedThenFailed(error)),
+        result => result,
+    }
+}
+
+fn push_phase<P, S>(
+    name: &str,
+    clone_path: &Path,
+    repo: &Repository,
+    committed: bool,
+    rejection_prompter: &mut P,
+    shell_launcher: &mut S,
+) -> anyhow::Result<RepoOutcome>
+where
+    P: FnMut(&SavePromptCtx<'_>) -> anyhow::Result<SaveChoice>,
+    S: FnMut(&Path) -> anyhow::Result<()>,
+{
+    match git::push(repo).with_context(|| format!("pushing `{name}`"))? {
         PushOutcome::Pushed => {
             if committed {
                 println!("committed + pushed  {name}");
@@ -256,8 +288,8 @@ where
         }
         PushOutcome::Rejected(reason) => handle_rejected(
             name,
-            &clone_path,
-            &repo,
+            clone_path,
+            repo,
             committed,
             &reason,
             rejection_prompter,
@@ -768,6 +800,21 @@ mod tests {
         }
     }
 
+    /// Points `origin` at a path holding no repository, so a push errors
+    /// outright instead of coming back as a rejection.
+    fn break_origin(repo: &Repository) {
+        let missing = repo.workdir().unwrap().join("no-such-remote");
+        repo.remote_set_url("origin", &format!("file://{}", missing.display()))
+            .unwrap();
+    }
+
+    fn break_origin_launcher() -> impl FnMut(&Path) -> anyhow::Result<()> {
+        |path| {
+            break_origin(&Repository::open(path)?);
+            Ok(())
+        }
+    }
+
     fn bare_remote() -> (TempDir, String) {
         let dir = TempDir::new().unwrap();
         crate::git::test_support::init_bare(dir.path());
@@ -950,6 +997,93 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, RepoOutcome::Pushed), "{outcome:?}");
+    }
+
+    /// White-box: a push that errors after a fresh commit still reports the
+    /// commit, so the summary can't claim nothing was committed.
+    #[test]
+    fn process_repo_reports_commit_when_push_errors() {
+        let (_remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
+        fs::write(b_path.join("notes.md"), "fresh\n").unwrap();
+        break_origin(&b_repo);
+
+        let config = config_with(vec![("r", url, &b_path)]);
+        let env = SystemEnv;
+        let outcome = process_repo(
+            "r",
+            &config.repos["r"],
+            &shared("add notes"),
+            &env,
+            &mut scripted_rejection_prompter(vec![]),
+            &mut never_called_commit_prompter(),
+            &mut never_called_launcher(),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, RepoOutcome::CommittedThenFailed(_)),
+            "{outcome:?}"
+        );
+        let head_message = b_repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .message()
+            .unwrap()
+            .to_string();
+        assert_eq!(head_message, "add notes");
+    }
+
+    /// White-box: same guarantee when the re-push after [m]anual errors.
+    #[test]
+    fn process_repo_reports_commit_when_re_push_errors() {
+        let (_remote, url, _b_dir, b_path, _b_repo) = fixture_remote_and_clone();
+        let (_a_dir, _a_path, a_repo) = clone_to_tempdir(&url);
+        commit_file(&a_repo, "from-a.txt", "a", "from A");
+        push_main(&a_repo);
+        fs::write(b_path.join("from-b.txt"), "b").unwrap();
+
+        let config = config_with(vec![("r", url, &b_path)]);
+        let env = SystemEnv;
+        let outcome = process_repo(
+            "r",
+            &config.repos["r"],
+            &shared("from B"),
+            &env,
+            &mut scripted_rejection_prompter(vec![SaveChoice::Manual]),
+            &mut never_called_commit_prompter(),
+            &mut break_origin_launcher(),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, RepoOutcome::CommittedThenFailed(_)),
+            "{outcome:?}"
+        );
+    }
+
+    /// White-box: with no fresh commit there's nothing to report alongside
+    /// the push error, so it stays a plain failure.
+    #[test]
+    fn process_repo_propagates_push_error_without_new_commit() {
+        let (_remote, url, _b_dir, b_path, b_repo) = fixture_remote_and_clone();
+        commit_file(&b_repo, "earlier.txt", "x", "earlier commit");
+        break_origin(&b_repo);
+
+        let config = config_with(vec![("r", url, &b_path)]);
+        let env = SystemEnv;
+        let result = process_repo(
+            "r",
+            &config.repos["r"],
+            &shared("unused"),
+            &env,
+            &mut scripted_rejection_prompter(vec![]),
+            &mut never_called_commit_prompter(),
+            &mut never_called_launcher(),
+        );
+
+        assert!(result.is_err(), "{result:?}");
     }
 
     #[test]
